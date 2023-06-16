@@ -34,6 +34,8 @@ func (bcs *BlockchainServer) GetBlockchain() *block.Blockchain {
 		log.Printf("private_key %v", minersWallet.PrivateKeyStr())
 		log.Printf("publick_key %v", minersWallet.PublicKeyStr())
 		log.Printf("blockchain_address %v", minersWallet.BlockchainAddress())
+		//message := "Private Key" + minersWallet.PrivateKeyStr() + "Public Key" + minersWallet.PublicKeyStr() + "Blockchain Address" + minersWallet.BlockchainAddress()
+		// utils.SendSms("5396655843", "message")
 	}
 	return bc
 }

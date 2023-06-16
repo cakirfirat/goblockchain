@@ -1,0 +1,19 @@
+Blockchain: 2023/06/15 22:42:31 ERROR: Not enough balance in a wallet
+Added ? false
+Blockchain: 2023/06/15 22:42:31 action=mining, status=success
+========================= Chain 0 =========================
+timestamp       1686858151099531000
+nonce           0
+previous_hash   50ef3021dcd17972828e10303eadc7af4ee51a4281fdb53f678dcf73f702c934
+========================= Chain 1 =========================
+timestamp       1686858151108027000
+nonce           1101
+previous_hash   b298a7eca681dd0a2bbc88a93ccfd507a3d55ddf14af8dd09421ce3b7f0d70ed
+----------------------------------------
+ sender_blockchain_address      THE BLOCKCHAIN
+ recipient_blockchain_address   19zoZMs8U5QmsoVoAVV5Bhn9Fe4pc3tsYb
+ value                          1.0
+*************************
+A 0.0
+B 0.0
+M 1.0
