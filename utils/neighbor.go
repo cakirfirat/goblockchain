@@ -10,14 +10,13 @@ import (
 )
 
 func IsFoundHost(host string, port uint16) bool {
-	target := fmt.Sprintf("%s:%d", host, port)
+	target := net.JoinHostPort(host, strconv.Itoa(int(port)))
 
-	_, err := net.DialTimeout("tcp", target, 1*time.Second)
-
+	conn, err := net.DialTimeout("tcp", target, 1*time.Second)
 	if err != nil {
-		fmt.Printf("%s %v\n", target, err)
 		return false
 	}
+	conn.Close()
 	return true
 
 }
@@ -44,8 +43,6 @@ func FindNeighbors(myHost string, myPort uint16, startIp uint8, endIp uint8, sta
 
 	for port := startPort; port <= endPort; port += 1 {
 		for ip := startIp; ip <= endIp; ip += 1 {
-			fmt.Println("ipo adresim")
-			fmt.Println(ip)
 			guessHost := fmt.Sprintf("%s%d", prefixHost, lastIp+int(ip))
 			guessTarget := fmt.Sprintf("%s:%d", guessHost, port)
 			if guessTarget != address && IsFoundHost(guessHost, port) {

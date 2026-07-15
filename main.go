@@ -23,7 +23,7 @@ func main() {
 	//Blockchain
 	blockchain := block.NewBlockchain(walletM.BlockchainAddress(), 8080)
 	isAdded := blockchain.AddTransaction(walletA.BlockchainAddress(), walletB.BlockchainAddress(), 1.0,
-		walletA.PublicKey(), t.GenerateSignature())
+		t.Timestamp(), walletA.PublicKey(), t.GenerateSignature())
 	fmt.Println("Added ?", isAdded)
 
 	blockchain.Mining()

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"blockchain/utils"
 
@@ -98,11 +99,18 @@ type Transaction struct {
 	senderBlockchainAddress    string
 	recipientBlockchainAddress string
 	value                      float32
+	timestamp                  int64
 }
 
 func NewTransaction(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey,
 	sender string, recipient string, value float32) *Transaction {
-	return &Transaction{privateKey, publicKey, sender, recipient, value}
+	return &Transaction{privateKey, publicKey, sender, recipient, value, time.Now().UnixNano()}
+}
+
+// Timestamp, imzaya dahil edilen zaman damgası; node tarafında replay
+// korumasının parçası olarak işlemi benzersizleştirir
+func (t *Transaction) Timestamp() int64 {
+	return t.timestamp
 }
 
 func (t *Transaction) GenerateSignature() *utils.Signature {
@@ -113,15 +121,19 @@ func (t *Transaction) GenerateSignature() *utils.Signature {
 
 }
 
+// MarshalJSON, block.Transaction ile ALAN SIRASI DAHİL birebir aynı JSON üretmelidir;
+// imza bu çıktı üzerinden atılır ve node aynı çıktıyı yeniden kurup doğrular
 func (t *Transaction) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Sender    string  `json:"sender_blockchain_address"`
 		Recipient string  `json:"recipient_blockchain_address"`
 		Value     float32 `json:"value"`
+		Timestamp int64   `json:"timestamp"`
 	}{
 		Sender:    t.senderBlockchainAddress,
 		Recipient: t.recipientBlockchainAddress,
 		Value:     t.value,
+		Timestamp: t.timestamp,
 	})
 }
 

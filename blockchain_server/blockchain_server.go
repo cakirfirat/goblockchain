@@ -4,19 +4,33 @@ import (
 	"blockchain/block"
 	"blockchain/utils"
 	"blockchain/wallet"
+	"crypto/ecdsa"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 )
 
-var cache map[string]*block.Blockchain = make(map[string]*block.Blockchain)
+var (
+	cache    map[string]*block.Blockchain = make(map[string]*block.Blockchain)
+	cacheMux sync.Mutex
+)
 
 type BlockchainServer struct {
-	port uint16
-	p2p  *utils.P2PNetwork
+	port    uint16
+	p2p     *utils.P2PNetwork
+	dataDir string
+
+	// Checkpoint anahtarları: priv doluysa bu node otorite (imzalar),
+	// pub doluysa peer checkpoint'leri doğrulanıp uygulanır
+	checkpointPriv *ecdsa.PrivateKey
+	checkpointPub  *ecdsa.PublicKey
 }
 
 // CORS başlıklarını ekleyen yardımcı fonksiyon
@@ -27,31 +41,85 @@ func setCORSHeaders(w http.ResponseWriter) {
 }
 
 func NewBlockchainServer(port uint16) *BlockchainServer {
-	// Bootstrap URL varsayılan olarak boş
-	p2p := utils.NewP2PNetwork(port, 20, "")
-	return &BlockchainServer{port, p2p}
+	return NewBlockchainServerWithBootstrap(port, "")
 }
 
 func NewBlockchainServerWithBootstrap(port uint16, bootstrapURL string) *BlockchainServer {
 	p2p := utils.NewP2PNetwork(port, 20, bootstrapURL)
-	return &BlockchainServer{port, p2p}
+	return &BlockchainServer{port: port, p2p: p2p, dataDir: "data"}
+}
+
+// SetDataDir, zincir ve cüzdan dosyalarının yazılacağı dizini ayarlar
+func (bcs *BlockchainServer) SetDataDir(dir string) {
+	bcs.dataDir = dir
+}
+
+// SetCheckpointKeys, checkpoint otorite/doğrulama anahtarlarını ayarlar
+func (bcs *BlockchainServer) SetCheckpointKeys(priv *ecdsa.PrivateKey, pub *ecdsa.PublicKey) {
+	bcs.checkpointPriv = priv
+	if pub == nil && priv != nil {
+		pub = &priv.PublicKey
+	}
+	bcs.checkpointPub = pub
 }
 
 func (bcs *BlockchainServer) Port() uint16 {
 	return bcs.port
 }
 
+// minerWalletFile, node'un mining ödüllerini alacağı cüzdanın disk formatı
+type minerWalletFile struct {
+	PrivateKey        string `json:"private_key"`
+	PublicKey         string `json:"public_key"`
+	BlockchainAddress string `json:"blockchain_address"`
+}
+
+// loadOrCreateMinerWallet, miner cüzdanını diskten yükler; yoksa oluşturup kaydeder.
+// Böylece node yeniden başladığında ödüller aynı adreste birikmeye devam eder.
+func (bcs *BlockchainServer) loadOrCreateMinerWallet() string {
+	path := filepath.Join(bcs.dataDir, fmt.Sprintf("wallet_%d.json", bcs.Port()))
+
+	if data, err := os.ReadFile(path); err == nil {
+		var f minerWalletFile
+		if err := json.Unmarshal(data, &f); err == nil && f.BlockchainAddress != "" {
+			log.Printf("Miner cüzdanı diskten yüklendi: %s", f.BlockchainAddress)
+			return f.BlockchainAddress
+		}
+	}
+
+	minersWallet := wallet.NewWallet()
+	f := minerWalletFile{
+		PrivateKey:        minersWallet.PrivateKeyStr(),
+		PublicKey:         minersWallet.PublicKeyStr(),
+		BlockchainAddress: minersWallet.BlockchainAddress(),
+	}
+	if data, err := json.MarshalIndent(&f, "", "  "); err == nil {
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			log.Printf("UYARI: miner cüzdanı diske yazılamadı: %v", err)
+		}
+	}
+	log.Printf("Yeni miner cüzdanı oluşturuldu: %s (anahtarlar: %s)", f.BlockchainAddress, path)
+	return f.BlockchainAddress
+}
+
 func (bcs *BlockchainServer) GetBlockchain() *block.Blockchain {
+	cacheMux.Lock()
+	defer cacheMux.Unlock()
+
 	bc, ok := cache["blockchain"]
 	if !ok {
-		minersWallet := wallet.NewWallet()
-		bc = block.NewBlockchain(minersWallet.BlockchainAddress(), bcs.Port())
+		if err := os.MkdirAll(bcs.dataDir, 0700); err != nil {
+			log.Printf("UYARI: veri dizini oluşturulamadı (%s), kalıcılık devre dışı: %v", bcs.dataDir, err)
+		}
+		minerAddress := bcs.loadOrCreateMinerWallet()
+		chainFile := filepath.Join(bcs.dataDir, fmt.Sprintf("blockchain_%d.json", bcs.Port()))
+		bc = block.NewBlockchainWithPersistence(minerAddress, bcs.Port(), chainFile)
+		bc.SetPeerProvider(bcs.p2p)
+		if bcs.checkpointPriv != nil || bcs.checkpointPub != nil {
+			bc.SetCheckpointKeys(bcs.checkpointPriv, bcs.checkpointPub)
+		}
 		cache["blockchain"] = bc
-		log.Printf("private_key %v", minersWallet.PrivateKeyStr())
-		log.Printf("publick_key %v", minersWallet.PublicKeyStr())
-		log.Printf("blockchain_address %v", minersWallet.BlockchainAddress())
-		//message := "Private Key" + minersWallet.PrivateKeyStr() + "Public Key" + minersWallet.PublicKeyStr() + "Blockchain Address" + minersWallet.BlockchainAddress()
-		// utils.SendSms("5396655843", "message")
+		log.Printf("blockchain_address %v", minerAddress)
 	}
 	return bc
 }
@@ -70,11 +138,34 @@ func (bcs *BlockchainServer) GetChain(w http.ResponseWriter, req *http.Request) 
 	case http.MethodGet:
 		w.Header().Add("Content-Type", "application/json")
 		bc := bcs.GetBlockchain()
-		m, _ := bc.MarshalJSON()
-		io.WriteString(w, string(m[:]))
+		io.WriteString(w, string(bc.ChainJSON()))
 	default:
 		log.Printf("ERROR: Invalid HTTP Method")
 
+	}
+}
+
+// Checkpoint, bilinen en güncel imzalı checkpoint'i döndürür (GET /checkpoint)
+func (bcs *BlockchainServer) Checkpoint(w http.ResponseWriter, req *http.Request) {
+	setCORSHeaders(w)
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	switch req.Method {
+	case http.MethodGet:
+		cp := bcs.GetBlockchain().Checkpoint()
+		if cp == nil {
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, string(utils.JsonStatus("no checkpoint")))
+			return
+		}
+		w.Header().Add("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(cp)
+	default:
+		log.Println("ERROR: Invalid HTTP Method")
+		w.WriteHeader(http.StatusBadRequest)
 	}
 }
 
@@ -120,7 +211,7 @@ func (bcs *BlockchainServer) Transactions(w http.ResponseWriter, req *http.Reque
 		signature := utils.SignatureFromString(*t.Signature)
 		bc := bcs.GetBlockchain()
 		isCreated := bc.CreateTransaction(*t.SenderBlockchainAddress,
-			*t.RecipientBlockchainAddress, *t.Value, publicKey, signature)
+			*t.RecipientBlockchainAddress, *t.Value, *t.Timestamp, publicKey, signature)
 
 		w.Header().Add("Content-Type", "application/json")
 		var m []byte
@@ -150,7 +241,7 @@ func (bcs *BlockchainServer) Transactions(w http.ResponseWriter, req *http.Reque
 		signature := utils.SignatureFromString(*t.Signature)
 		bc := bcs.GetBlockchain()
 		isUpdated := bc.AddTransaction(*t.SenderBlockchainAddress,
-			*t.RecipientBlockchainAddress, *t.Value, publicKey, signature)
+			*t.RecipientBlockchainAddress, *t.Value, *t.Timestamp, publicKey, signature)
 
 		w.Header().Add("Content-Type", "application/json")
 		var m []byte
@@ -240,7 +331,7 @@ func (bcs *BlockchainServer) Amount(w http.ResponseWriter, req *http.Request) {
 		blockchainAddress := req.URL.Query().Get("blockchain_address")
 		amount := bcs.GetBlockchain().CalculateTotalAmount(blockchainAddress)
 
-		ar := &block.AmountResponse{amount}
+		ar := &block.AmountResponse{Amount: amount}
 		m, _ := ar.MarshalJSON()
 
 		w.Header().Add("Content-Type", "application/json")
@@ -471,6 +562,7 @@ func (bcs *BlockchainServer) Run() {
 
 	// Normal blockchain endpoint'leri
 	mux.HandleFunc("/", bcs.GetChain)
+	mux.HandleFunc("/chain", bcs.GetChain)
 	mux.HandleFunc("/transactions", bcs.Transactions)
 	mux.HandleFunc("/mine", bcs.Mine)
 	mux.HandleFunc("/mine/start", bcs.StartMine)
@@ -481,6 +573,7 @@ func (bcs *BlockchainServer) Run() {
 	mux.HandleFunc("/peers", bcs.Peers)
 	mux.HandleFunc("/p2p/status", bcs.P2PStatus)
 	mux.HandleFunc("/block", bcs.Block)
+	mux.HandleFunc("/checkpoint", bcs.Checkpoint)
 
 	// Log bilgilerini yazdır ve sunucuyu başlat
 	log.Printf("Blockchain Server starting on port %d with P2P network", bcs.Port())

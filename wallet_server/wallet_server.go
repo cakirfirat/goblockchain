@@ -230,12 +230,15 @@ func (ws *WalletServer) CreateTransaction(w http.ResponseWriter, req *http.Reque
 			*t.SenderBlockchainAddress, *t.RecipientBlockchainAddress, value32)
 		signature := transaction.GenerateSignature()
 		signatureStr := signature.String()
+		timestamp := transaction.Timestamp()
 
 		bt := &block.TransactionRequest{
-			t.SenderBlockchainAddress,
-			t.RecipientBlockchainAddress,
-			t.SenderPublicKey,
-			&value32, &signatureStr,
+			SenderBlockchainAddress:    t.SenderBlockchainAddress,
+			RecipientBlockchainAddress: t.RecipientBlockchainAddress,
+			SenderPublicKey:            t.SenderPublicKey,
+			Value:                      &value32,
+			Timestamp:                  &timestamp,
+			Signature:                  &signatureStr,
 		}
 		m, _ := json.Marshal(bt)
 		buf := bytes.NewBuffer(m)
@@ -294,12 +297,14 @@ func (ws *WalletServer) CreateHDTransaction(w http.ResponseWriter, req *http.Req
 
 		// Blockchain sunucusuna gönder
 		pubKeyStr := hdWallet.PublicKeyStr()
+		timestamp := transaction.Timestamp()
 		bt := &block.TransactionRequest{
-			&hdWallet.BlockchainAddress,
-			&t.RecipientBlockchainAddress,
-			&pubKeyStr,
-			&t.Value,
-			&signatureStr,
+			SenderBlockchainAddress:    &hdWallet.BlockchainAddress,
+			RecipientBlockchainAddress: &t.RecipientBlockchainAddress,
+			SenderPublicKey:            &pubKeyStr,
+			Value:                      &t.Value,
+			Timestamp:                  &timestamp,
+			Signature:                  &signatureStr,
 		}
 
 		m, _ := json.Marshal(bt)

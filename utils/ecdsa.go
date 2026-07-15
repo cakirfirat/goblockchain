@@ -38,7 +38,7 @@ func SignatureFromString(s string) *Signature {
 
 func PublicKeyFromString(s string) *ecdsa.PublicKey {
 	x, y := String2BigIntTuple(s)
-	return &ecdsa.PublicKey{elliptic.P256(), &x, &y}
+	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: &x, Y: &y}
 
 }
 
@@ -46,5 +46,19 @@ func PrivateKeyFromString(s string, publicKey *ecdsa.PublicKey) *ecdsa.PrivateKe
 	b, _ := hex.DecodeString(s[:])
 	var bi big.Int
 	_ = bi.SetBytes(b)
-	return &ecdsa.PrivateKey{*publicKey, &bi}
+	return &ecdsa.PrivateKey{PublicKey: *publicKey, D: &bi}
+}
+
+// PrivateKeyFromHex, hex özel anahtardan açık anahtarı da türeterek tam bir
+// anahtar çifti oluşturur (checkpoint otorite anahtarı için)
+func PrivateKeyFromHex(s string) (*ecdsa.PrivateKey, error) {
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("geçersiz özel anahtar hex: %w", err)
+	}
+	priv := new(ecdsa.PrivateKey)
+	priv.Curve = elliptic.P256()
+	priv.D = new(big.Int).SetBytes(b)
+	priv.PublicKey.X, priv.PublicKey.Y = priv.Curve.ScalarBaseMult(b)
+	return priv, nil
 }

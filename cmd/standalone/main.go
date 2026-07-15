@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ var (
 	openBrowser    = flag.Bool("open", true, "Tarayıcıyı otomatik aç")
 	dnsSeeds       = flag.String("dns-seeds", "seed.flatuncoin.com,seed2.flatuncoin.com", "DNS seed sunucuları (virgülle ayrılmış)")
 	templatesDir   = flag.String("templates", "templates", "Template dosyaları dizini")
+	dataDir        = flag.String("data-dir", "data", "Zincir ve cüzdan dosyalarının yazılacağı dizin")
 )
 
 // BlockchainServer yapısı
@@ -57,17 +59,50 @@ type StandaloneServer struct {
 	wg                sync.WaitGroup
 }
 
+// loadOrCreateHDWallet, standalone node'un mining cüzdanını diskte saklar;
+// yeniden başlatmada aynı mnemonic'ten aynı cüzdan yüklenir ve ödüller kaybolmaz
+func loadOrCreateHDWallet(dir string) *wallet.HDWallet {
+	path := filepath.Join(dir, "standalone_wallet.json")
+
+	if data, err := os.ReadFile(path); err == nil {
+		var f struct {
+			Mnemonic string `json:"mnemonic"`
+		}
+		if err := json.Unmarshal(data, &f); err == nil && f.Mnemonic != "" {
+			hd := wallet.NewHDWalletFromMnemonic(f.Mnemonic, "")
+			log.Printf("Cüzdan diskten yüklendi: %s", hd.BlockchainAddress)
+			return hd
+		}
+	}
+
+	hd := wallet.NewHDWallet()
+	data, _ := json.MarshalIndent(struct {
+		Mnemonic          string `json:"mnemonic"`
+		BlockchainAddress string `json:"blockchain_address"`
+	}{hd.Mnemonic, hd.BlockchainAddress}, "", "  ")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		log.Printf("UYARI: cüzdan diske yazılamadı: %v", err)
+	}
+	log.Printf("Yeni cüzdan oluşturuldu: %s (kurtarma: %s)", hd.BlockchainAddress, path)
+	return hd
+}
+
 func NewStandaloneServer(walletPort, blockchainPort uint16, miner bool) *StandaloneServer {
 	blockchainAddr := fmt.Sprintf("http://localhost:%d", blockchainPort)
 
-	// Cüzdan oluştur (uygulamanın mining yapmak için kullanacağı cüzdan)
-	hdWallet := wallet.NewHDWallet()
+	if err := os.MkdirAll(*dataDir, 0700); err != nil {
+		log.Printf("UYARI: veri dizini oluşturulamadı: %v", err)
+	}
+
+	// Cüzdan oluştur/yükle (uygulamanın mining yapmak için kullanacağı cüzdan)
+	hdWallet := loadOrCreateHDWallet(*dataDir)
 
 	// Blockchain sunucusunu oluştur
 	blockchainServer := NewBlockchainServer(blockchainPort, *blockchainPeer)
 
-	// Blockchain nesnesini oluştur
-	blockchain := block.NewBlockchain(hdWallet.BlockchainAddress, blockchainPort)
+	// Blockchain nesnesini oluştur (kalıcı: her blok diske yazılır)
+	chainFile := filepath.Join(*dataDir, fmt.Sprintf("blockchain_%d.json", blockchainPort))
+	blockchain := block.NewBlockchainWithPersistence(hdWallet.BlockchainAddress, blockchainPort, chainFile)
 
 	// Cüzdan sunucusu oluştur
 	walletServer := NewWalletServer(walletPort, blockchainAddr)
@@ -119,23 +154,57 @@ func (s *StandaloneServer) Run() {
 			})
 		}
 
-		// Blockchain API route'larını ayarla - HTTP metod kontrolü olmadan
+		// Blockchain API route'ları
 		mux.HandleFunc("/chain", func(w http.ResponseWriter, req *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			m, _ := s.blockchain.MarshalJSON()
-			io.WriteString(w, string(m[:]))
+			io.WriteString(w, string(s.blockchain.ChainJSON()))
 		})
 
 		mux.HandleFunc("/transactions", func(w http.ResponseWriter, req *http.Request) {
+			switch req.Method {
+			case http.MethodPost:
+				// Cüzdan arayüzünden gelen imzalı işlem
+				decoder := json.NewDecoder(req.Body)
+				var t block.TransactionRequest
+				if err := decoder.Decode(&t); err != nil || !t.Validate() {
+					log.Printf("ERROR: geçersiz işlem isteği")
+					w.WriteHeader(http.StatusBadRequest)
+					io.WriteString(w, string(utils.JsonStatus("fail")))
+					return
+				}
+				publicKey := utils.PublicKeyFromString(*t.SenderPublicKey)
+				signature := utils.SignatureFromString(*t.Signature)
+				isCreated := s.blockchain.CreateTransaction(*t.SenderBlockchainAddress,
+					*t.RecipientBlockchainAddress, *t.Value, *t.Timestamp, publicKey, signature)
+
+				w.Header().Set("Content-Type", "application/json")
+				if !isCreated {
+					w.WriteHeader(http.StatusBadRequest)
+					io.WriteString(w, string(utils.JsonStatus("fail")))
+					return
+				}
+				w.WriteHeader(http.StatusCreated)
+				io.WriteString(w, string(utils.JsonStatus("success")))
+			default:
+				w.Header().Set("Content-Type", "application/json")
+				transactions := s.blockchain.TransactionPool()
+				m, _ := json.Marshal(struct {
+					Transactions []*block.Transaction `json:"transactions"`
+					Length       int                  `json:"length"`
+				}{
+					Transactions: transactions,
+					Length:       len(transactions),
+				})
+				io.WriteString(w, string(m[:]))
+			}
+		})
+
+		mux.HandleFunc("/amount", func(w http.ResponseWriter, req *http.Request) {
+			blockchainAddress := req.URL.Query().Get("blockchain_address")
+			amount := s.blockchain.CalculateTotalAmount(blockchainAddress)
+			ar := &block.AmountResponse{Amount: amount}
+			m, _ := ar.MarshalJSON()
 			w.Header().Set("Content-Type", "application/json")
-			transactions := s.blockchain.TransactionPool()
-			m, _ := json.Marshal(struct {
-				Transactions []*block.Transaction `json:"transactions"`
-				Length       int                  `json:"length"`
-			}{
-				Transactions: transactions,
-				Length:       len(transactions),
-			})
 			io.WriteString(w, string(m[:]))
 		})
 
@@ -437,12 +506,14 @@ func (ws *WalletServer) CreateTransaction(w http.ResponseWriter, req *http.Reque
 			*t.SenderBlockchainAddress, *t.RecipientBlockchainAddress, value32)
 		signature := transaction.GenerateSignature()
 		signatureStr := signature.String()
+		timestamp := transaction.Timestamp()
 
 		bt := &block.TransactionRequest{
 			SenderBlockchainAddress:    t.SenderBlockchainAddress,
 			RecipientBlockchainAddress: t.RecipientBlockchainAddress,
 			SenderPublicKey:            t.SenderPublicKey,
 			Value:                      &value32,
+			Timestamp:                  &timestamp,
 			Signature:                  &signatureStr,
 		}
 		m, _ := json.Marshal(bt)
@@ -500,11 +571,13 @@ func (ws *WalletServer) CreateHDTransaction(w http.ResponseWriter, req *http.Req
 
 		// Blockchain sunucusuna gönder
 		pubKeyStr := hdWallet.PublicKeyStr()
+		timestamp := transaction.Timestamp()
 		bt := &block.TransactionRequest{
 			SenderBlockchainAddress:    &hdWallet.BlockchainAddress,
 			RecipientBlockchainAddress: &t.RecipientBlockchainAddress,
 			SenderPublicKey:            &pubKeyStr,
 			Value:                      &t.Value,
+			Timestamp:                  &timestamp,
 			Signature:                  &signatureStr,
 		}
 

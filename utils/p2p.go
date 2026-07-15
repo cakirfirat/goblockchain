@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,10 @@ type P2PNetwork struct {
 	BootstrapURL string              // Ağa katılmak için bootstrap sunucusu (opsiyonel)
 	Port         uint16              // Bu düğümün dinlediği port
 	UseDNS       bool                // DNS seed kullanılsın mı?
+
+	// Nodes haritası hem keşif goroutine'inden hem HTTP handler'larından
+	// erişildiği için kilitle korunur
+	mux sync.RWMutex
 }
 
 // NewP2PNetwork creates a new P2P network manager
@@ -129,6 +134,9 @@ func (p *P2PNetwork) AddNode(address string) {
 		return
 	}
 
+	p.mux.Lock()
+	defer p.mux.Unlock()
+
 	// Node zaten varsa bilgilerini güncelle
 	if node, exists := p.Nodes[address]; exists {
 		node.LastSeen = time.Now()
@@ -166,12 +174,17 @@ func (p *P2PNetwork) AddNode(address string) {
 
 // RemoveNode removes a node from the network
 func (p *P2PNetwork) RemoveNode(address string) {
+	p.mux.Lock()
+	defer p.mux.Unlock()
 	delete(p.Nodes, address)
 	log.Printf("Removed node: %s", address)
 }
 
 // GetActiveNodes returns a list of all active nodes
 func (p *P2PNetwork) GetActiveNodes() []string {
+	p.mux.RLock()
+	defer p.mux.RUnlock()
+
 	activeNodes := make([]string, 0)
 	now := time.Now()
 
@@ -277,7 +290,7 @@ func (p *P2PNetwork) DiscoverNodes(startIp, endIp uint8, startPort, endPort uint
 
 // GetPeersFromNodes asks other nodes for their known peers
 func (p *P2PNetwork) GetPeersFromNodes() {
-	for address := range p.Nodes {
+	for _, address := range p.GetKnownPeers() {
 		// Her node'dan peer listesini iste
 		resp, err := http.Get(fmt.Sprintf("http://%s/peers", address))
 		if err != nil {
@@ -301,17 +314,18 @@ func (p *P2PNetwork) GetPeersFromNodes() {
 // BroadcastData sends data to all active nodes
 func (p *P2PNetwork) BroadcastData(endpoint string, data interface{}) map[string]error {
 	results := make(map[string]error)
-	jsonData, err := json.Marshal(data)
+	peers := p.GetKnownPeers()
 
+	jsonData, err := json.Marshal(data)
 	if err != nil {
-		for addr := range p.Nodes {
+		for _, addr := range peers {
 			results[addr] = err
 		}
 		return results
 	}
 
-	// Tüm aktif nodlara veriyi gönder
-	for addr := range p.Nodes {
+	// Tüm aktif nodlara veriyi gönder (ağ çağrıları kilit dışında)
+	for _, addr := range peers {
 		url := fmt.Sprintf("http://%s%s", addr, endpoint)
 		resp, err := http.Post(
 			url,
@@ -321,29 +335,30 @@ func (p *P2PNetwork) BroadcastData(endpoint string, data interface{}) map[string
 
 		if err != nil {
 			results[addr] = err
-			// Hata alırsak reputasyonu düşür
-			if node, exists := p.Nodes[addr]; exists {
-				node.Reputation--
-				// Çok düşük reputasyonlu nodları kaldır
-				if node.Reputation < -5 {
-					delete(p.Nodes, addr)
-				}
-			}
+			p.adjustReputation(addr, -1)
 			continue
 		}
 
 		io.Copy(io.Discard, resp.Body) // Yanıtı boşalt
 		resp.Body.Close()
 
-		// Başarılı iletişimde reputasyonu artır
-		if node, exists := p.Nodes[addr]; exists {
-			node.Reputation++
-		}
-
+		p.adjustReputation(addr, +1)
 		results[addr] = nil
 	}
 
 	return results
+}
+
+// adjustReputation, node güvenilirlik puanını günceller; çok düşük puanlıları kaldırır
+func (p *P2PNetwork) adjustReputation(addr string, delta int) {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+	if node, exists := p.Nodes[addr]; exists {
+		node.Reputation += delta
+		if node.Reputation < -5 {
+			delete(p.Nodes, addr)
+		}
+	}
 }
 
 // parsePort helper function to parse port string to uint16
@@ -374,6 +389,9 @@ func (p *P2PNetwork) RunNodeDiscovery(interval time.Duration,
 
 // CleanupInactiveNodes removes nodes that haven't been seen for a while
 func (p *P2PNetwork) CleanupInactiveNodes(maxAge time.Duration) {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+
 	now := time.Now()
 	for addr, node := range p.Nodes {
 		if now.Sub(node.LastSeen) > maxAge {
@@ -385,6 +403,9 @@ func (p *P2PNetwork) CleanupInactiveNodes(maxAge time.Duration) {
 
 // GetKnownPeers returns a list of all known peers
 func (p *P2PNetwork) GetKnownPeers() []string {
+	p.mux.RLock()
+	defer p.mux.RUnlock()
+
 	peers := make([]string, 0, len(p.Nodes))
 	for addr := range p.Nodes {
 		peers = append(peers, addr)
