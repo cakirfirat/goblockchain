@@ -5,125 +5,610 @@
     <meta charset="UTF-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wallet</title>
-    <script src="https://code.jquery.com/jquery-3.7.0.js"
-        integrity="sha256-JlqSTELeR4TLqP0OG9dxM7yDPqX1ox/HfgiSLBj8+kM=" crossorigin="anonymous"></script>
+    <title>FlatunChain</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"
+        integrity="sha256-/xUj+3OJU5yExlq6GSYGSHk7tPXikynS7ogEvDej/m4=" crossorigin="anonymous"></script>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet"
         integrity="sha384-EVSTQN3/azprG1Anm3QDgpJLIm9Nao0Yz1ztcQTwFspd3yD65VohhpuuCOmLASjC" crossorigin="anonymous">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.1/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-MrcW6ZMFYlzcLA8Nl+NtUVF0sA7MsXsP1UyJoMp4YLEuNSfAP+JcXn/tWtIaxVXM"
+        crossorigin="anonymous"></script>
+    <style>
+        .nav-pills .nav-link.active {
+            background-color: #198754;
+        }
+        .blockchain-status {
+            background-color: #f8f9fa;
+            border-radius: 0.25rem;
+            padding: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        .mining-controls {
+            margin-top: 1rem;
+            padding: 1rem;
+            background-color: #f8f9fa;
+            border-radius: 0.25rem;
+        }
+    </style>
     <script>
+        // Global kapsamda tanımlı fonksiyonlar
+        function startMining() {
+            $.ajax({
+                url: '/mine/start',
+                type: 'GET',
+                success: function(response) {
+                    if (response.message === 'success') {
+                        alert('Mining başlatıldı! İşlem havuzundaki işlemler işlenecek ve bloklar oluşturulacak.');
+                        updateBlockchainStatus();
+                    } else {
+                        alert('Mining başlatılırken bir hata oluştu.');
+                    }
+                },
+                error: function(error) {
+                    console.error(error);
+                    alert('Mining başlatılırken bir hata oluştu.');
+                }
+            });
+        }
+
+        // Manuel bir blok madenciliği
+        function mineBlock() {
+            $.ajax({
+                url: '/mine',
+                type: 'GET',
+                success: function(response) {
+                    if (response.message === 'success') {
+                        alert('Blok başarıyla madencilik yapıldı!');
+                        updateBlockchainStatus();
+                        fetchWalletAmount();
+                    } else {
+                        alert('Blok madenciliği başarısız oldu. İşlem havuzunda yeterli işlem olmayabilir.');
+                    }
+                },
+                error: function(error) {
+                    console.error(error);
+                    alert('Blok madenciliği sırasında bir hata oluştu.');
+                }
+            });
+        }
+
+        // Blockchain durumunu güncelle
+        function updateBlockchainStatus() {
+            $.ajax({
+                url: '/chain',
+                type: 'GET',
+                success: function(response) {
+                    const chain = response.chain;
+                    const blockCount = chain.length;
+                    const lastBlock = chain[blockCount - 1];
+                    
+                    $('#block-count').text(blockCount);
+                    $('#last-block-time').text(new Date(lastBlock.timestamp / 1000000).toLocaleString());
+                    $('#current-difficulty').text(lastBlock.difficulty);
+                },
+                error: function(error) {
+                    console.error(error);
+                }
+            });
+
+            // İşlem havuzu bilgisini güncelle
+            $.ajax({
+                url: '/transactions',
+                type: 'GET',
+                success: function(response) {
+                    $('#transaction-pool-count').text(response.length);
+                },
+                error: function(error) {
+                    console.error(error);
+                }
+            });
+        }
+
+        // P2P ağ durumunu güncelle
+        function updateP2PStatus() {
+            $.ajax({
+                url: '/p2p-status',
+                type: 'GET',
+                success: function(response) {
+                    $('#peer-count').text(response.peer_count);
+                    $('#p2p-status').text(response.p2p_enabled ? 'Aktif' : 'Kapalı');
+                    $('#dns-seeds-status').text(response.dns_seeds_enabled ? 'Aktif' : 'Kapalı');
+                },
+                error: function(error) {
+                    console.error(error);
+                }
+            });
+        }
+
         $(function () {
+            // Standard cüzdan oluşturma
+            $('#create_wallet').click(function () {
             $.ajax({
                 url: "/wallet",
                 type: "POST",
                 success: function (response) {
-                    $("#public_key").val(response["public_key"]);
-                    $("#private_key").val(response["private_key"]);
-                    $("#blockchain_address").val(response["blockchain_address"]);
-                    console.info(response);
+                        $('#public_key').val(response['public_key']);
+                        $('#private_key').val(response['private_key']);
+                        $('#blockchain_address').val(response['blockchain_address']);
+                        
+                        // Cüzdan panel tipini değiştir
+                        $('#wallet_type_label').text('Standart Cüzdan');
+                        $('#standard_wallet_panel').show();
+                        $('#hd_wallet_panel').hide();
+                    },
+                    error: function (error) {
+                        console.error(error);
+                    }
+                })
+            });
+
+            // HD cüzdan oluşturma
+            $('#create_hd_wallet').click(function () {
+                $.ajax({
+                    url: "/wallet?type=hd",
+                    type: "POST",
+                    success: function (response) {
+                        $('#hd_mnemonic').val(response['mnemonic']);
+                        $('#hd_private_key').val(response['private_key']);
+                        $('#hd_public_key').val(response['public_key']);
+                        $('#hd_blockchain_address').val(response['blockchain_address']);
+                        
+                        // Cüzdan panel tipini değiştir
+                        $('#wallet_type_label').text('HD Cüzdan');
+                        $('#standard_wallet_panel').hide();
+                        $('#hd_wallet_panel').show();
                 },
                 error: function (error) {
                     console.error(error);
                 }
             })
-            $("#send_money_button").click(function () {
-                let confirm_text = "Are you sure to send?";
-                let confirm_result = confirm(confirm_text);
-                if (confirm_result !== true) {
-                    alert("cancelled");
-                    return
+            });
+
+            // HD cüzdan içe aktarma
+            $('#import_hd_wallet').click(function () {
+                const mnemonic = $('#import_mnemonic').val();
+                const passphrase = $('#import_passphrase').val();
+                
+                if (!mnemonic) {
+                    alert('Lütfen seed phrase\'i girin!');
+                    return;
+                }
+                
+                $.ajax({
+                    url: "/wallet/hd/import",
+                    type: "POST",
+                    contentType: "application/json",
+                    data: JSON.stringify({
+                        mnemonic: mnemonic,
+                        passphrase: passphrase
+                    }),
+                    success: function (response) {
+                        $('#hd_mnemonic').val(response['mnemonic']);
+                        $('#hd_private_key').val(response['private_key']);
+                        $('#hd_public_key').val(response['public_key']);
+                        $('#hd_blockchain_address').val(response['blockchain_address']);
+                        
+                        // Cüzdan panel tipini değiştir
+                        $('#wallet_type_label').text('HD Cüzdan (İçe Aktarıldı)');
+                        $('#standard_wallet_panel').hide();
+                        $('#hd_wallet_panel').show();
+                        
+                        // İçe aktarma formunu temizle
+                        $('#import_form').collapse('hide');
+                        $('#import_mnemonic').val('');
+                        $('#import_passphrase').val('');
+                    },
+                    error: function (error) {
+                        console.error(error);
+                        alert('Cüzdan içe aktarılırken bir hata oluştu!');
+                    }
+                })
+            });
+
+            // HD cüzdandan çoklu adres türetme
+            $('#derive_addresses').click(function () {
+                const mnemonic = $('#hd_mnemonic').val();
+                const account = parseInt($('#derive_account').val()) || 0;
+                const change = parseInt($('#derive_change').val()) || 0;
+                const count = parseInt($('#derive_count').val()) || 5;
+                
+                if (!mnemonic) {
+                    alert('Önce bir HD cüzdan oluşturun veya içe aktarın!');
+                    return;
                 }
 
-                let transaction_data = {
-                    "sender_private_key": $("#private_key").val(),
-                    "sender_blockchain_address": $("#blockchain_address").val(),
-                    "recipient_blockchain_address": $("#recipient_blockchain_address").val(),
-                    "sender_public_key": $("#public_key").val(),
-                    "value": $("#send_amount").val()
+                $.ajax({
+                    url: "/wallet/hd/derive",
+                    type: "POST",
+                    contentType: "application/json",
+                    data: JSON.stringify({
+                        mnemonic: mnemonic,
+                        account: account,
+                        change: change,
+                        address_count: count
+                    }),
+                    success: function (response) {
+                        // Türetilmiş adresleri listele
+                        const addressList = $('#derived_addresses');
+                        addressList.empty();
+                        
+                        response.addresses.forEach((address, index) => {
+                            const path = `m/44'/0'/${account}'/${change}/${index}`;
+                            addressList.append(`<li class="list-group-item"><strong>${path}</strong>: ${address}</li>`);
+                        });
+                        
+                        $('#derive_form').collapse('show');
+                    },
+                    error: function (error) {
+                        console.error(error);
+                        alert('Adresler türetilirken bir hata oluştu!');
+                    }
+                })
+            });
+
+            // Para gönderme işlemi (standart cüzdan için)
+            $('#send_money').click(function () {
+                let confirm_text = 'İşlemi göndermek istediğinize emin misiniz?\n\nAlıcı: ' + $('#recipient_blockchain_address').val() + '\nMiktar: ' + $('#send_amount').val();
+                
+                let r = confirm(confirm_text);
+                if (!r) {
+                    return;
+                }
+                
+                const transaction = {
+                    sender_private_key: $('#private_key').val(),
+                    sender_blockchain_address: $('#blockchain_address').val(),
+                    recipient_blockchain_address: $('#recipient_blockchain_address').val(),
+                    sender_public_key: $('#public_key').val(),
+                    value: $('#send_amount').val(),
                 };
 
                 $.ajax({
-                    url: "/transaction",
-                    type: "POST",
-                    contentType: "application/json",
-                    data: JSON.stringify(transaction_data),
+                    url: '/transaction',
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify(transaction),
                     success: function (response) {
-                        console.info(response)
                         if (response.message === 'fail') {
-                            alert("failed")
-                            return
-                        } else {
-                            alert("success")
+                            alert('İşlem başarısız oldu. Lütfen daha sonra tekrar deneyin.');
+                            return;
                         }
-                        alert("send success");
-                    },
-                    error: function (response) {
-                        console.error(response)
-                        alert("Send failed");
-                    }
-                })
-            })
-
-            function reload_amount() {
-                let data = { 'blockchain_address': $('#blockchain_address').val() }
-                $.ajax({
-                    url: '/wallet/amount',
-                    type: 'GET',
-                    data: data,
-                    success: function (response) {
-                        let amount = response['amount'];
-                        $('#wallet_amount').text(amount)
-                        console.info(amount)
+                        
+                        alert('İşlem başarıyla gönderildi!');
+                        $('#recipient_blockchain_address').val('');
+                        $('#send_amount').val('');
+                        
+                        setTimeout(function () {
+                            fetchWalletAmount();
+                        }, 1000);
                     },
                     error: function (error) {
-                        console.error(error)
+                        console.error(error);
+                        alert('İşlem gönderilirken bir hata oluştu!');
                     }
-                })
+                });
+            });
+
+            // Para gönderme işlemi (HD cüzdan için)
+            $('#send_money_hd').click(function () {
+                let confirm_text = 'İşlemi göndermek istediğinize emin misiniz?\n\nAlıcı: ' + $('#recipient_blockchain_address_hd').val() + '\nMiktar: ' + $('#send_amount_hd').val();
+                
+                let r = confirm(confirm_text);
+                if (!r) {
+                    return;
+                }
+                
+                const transaction = {
+                    mnemonic: $('#hd_mnemonic').val(),
+                    recipient_blockchain_address: $('#recipient_blockchain_address_hd').val(),
+                    value: parseFloat($('#send_amount_hd').val())
+                };
+
+                $.ajax({
+                    url: '/transaction/hd',
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify(transaction),
+                    success: function (response) {
+                        if (response.message === 'fail') {
+                            alert('İşlem başarısız oldu. Lütfen daha sonra tekrar deneyin.');
+                            return;
+                        }
+                        
+                        alert('İşlem başarıyla gönderildi!');
+                        $('#recipient_blockchain_address_hd').val('');
+                        $('#send_amount_hd').val('');
+                        
+                        setTimeout(function () {
+                            fetchWalletAmount();
+                        }, 1000);
+                    },
+                    error: function (error) {
+                        console.error(error);
+                        alert('İşlem gönderilirken bir hata oluştu!');
+                    }
+                });
+            });
+
+            // Bakiye sorgulama
+            function fetchWalletAmount() {
+                if ($('#standard_wallet_panel').is(':visible')) {
+                    const blockchainAddress = $('#blockchain_address').val();
+                    if (!blockchainAddress) return;
+                    
+                    $.ajax({
+                        url: '/wallet/amount?blockchain_address=' + blockchainAddress,
+                        type: 'GET',
+                        success: function (response) {
+                            $('#wallet_amount').text(response.amount);
+                        },
+                        error: function (error) {
+                            console.error(error);
+                        }
+                    });
+                } else if ($('#hd_wallet_panel').is(':visible')) {
+                    const blockchainAddress = $('#hd_blockchain_address').val();
+                    if (!blockchainAddress) return;
+                    
+                    $.ajax({
+                        url: '/wallet/amount?blockchain_address=' + blockchainAddress,
+                        type: 'GET',
+                        success: function (response) {
+                            $('#wallet_amount').text(response.amount);
+                        },
+                        error: function (error) {
+                            console.error(error);
+                        }
+                    });
+                }
             }
-            // $('#reload_wallet').click(function () {
-            //     reload_amount();
-            // });
 
-            setInterval(reload_amount,3000)
+            setInterval(fetchWalletAmount, 5000);
 
-        })
+            // Sayfa yüklendiğinde durumları güncelle
+            $(document).ready(function() {
+                // Var olan ready fonksiyonu kodları
+                
+                // Durumları güncelle
+                updateBlockchainStatus();
+                updateP2PStatus();
+                
+                // 30 saniyede bir durumları güncelle
+                setInterval(function() {
+                    updateBlockchainStatus();
+                    updateP2PStatus();
+                    fetchWalletAmount();
+                }, 30000);
+            });
+        });
     </script>
 </head>
 
 <body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-success">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">FlatunChain</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"
+                aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <a class="nav-link active" aria-current="page" href="#">Cüzdan</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#blockchain-section">Blockchain</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#mining-section">Mining</a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
 
-    <div class="container">
-        <h1 class="text-center mt-3">Wallet</h1>
-        <div id="wallet_amount">0</div>
-        <!-- <button class="btn btn-outline-success" id="reload_wallet">Reload Wallet</button> -->
-        <br>
-        <p class="mt-3">Public Key</p>
-        <textarea class="form-control" name="" id="public_key" cols="100" rows="2"></textarea>
-        <br>
-        <p>Private</p>
-        <textarea class="form-control" name="" id="private_key" cols="100" rows="2"></textarea>
-        <br>
-        <p>Blockchain Address</p>
-        <textarea class="form-control" name="" id="blockchain_address" cols="100" rows="2"></textarea>
+    <div class="container mt-4">
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="blockchain-status">
+                    <h5>Blockchain Durumu</h5>
+                    <div class="row">
+                        <div class="col-md-3">
+                            <p><strong>Blok Sayısı:</strong> <span id="block-count">-</span></p>
+                        </div>
+                        <div class="col-md-3">
+                            <p><strong>Son Blok Zamanı:</strong> <span id="last-block-time">-</span></p>
+                        </div>
+                        <div class="col-md-3">
+                            <p><strong>Zorluk:</strong> <span id="current-difficulty">-</span></p>
+                        </div>
+                        <div class="col-md-3">
+                            <p><strong>İşlem Havuzu:</strong> <span id="transaction-pool-count">-</span></p>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-3">
+                            <p><strong>P2P Durumu:</strong> <span id="p2p-status">-</span></p>
+                        </div>
+                        <div class="col-md-3">
+                            <p><strong>Bağlı Peer:</strong> <span id="peer-count">-</span></p>
+                        </div>
+                        <div class="col-md-3">
+                            <p><strong>DNS Seeds:</strong> <span id="dns-seeds-status">-</span></p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row mb-4">
+            <div class="col text-center">
+                <button class="btn btn-primary" id="create_wallet">Standart Cüzdan Oluştur</button>
+                <button class="btn btn-success" id="create_hd_wallet">HD Cüzdan Oluştur</button>
+                <button class="btn btn-info" data-bs-toggle="collapse" data-bs-target="#import_form">
+                    Seed Phrase İle İçe Aktar
+                </button>
+            </div>
+        </div>
+
+        <!-- Seed Phrase İçe Aktarma Formu -->
+        <div id="import_form" class="collapse mb-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5>HD Cüzdanı İçe Aktar</h5>
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label for="import_mnemonic" class="form-label">Seed Phrase (BIP-39)</label>
+                        <textarea class="form-control" id="import_mnemonic" rows="2" placeholder="12 veya 24 kelimelik seed phrase girin..."></textarea>
+                    </div>
+                    <div class="mb-3">
+                        <label for="import_passphrase" class="form-label">Passphrase (İsteğe Bağlı)</label>
+                        <input type="password" class="form-control" id="import_passphrase" placeholder="Ek parola gerekiyorsa girin...">
+                    </div>
+                    <button class="btn btn-success" id="import_hd_wallet">İçe Aktar</button>
+                </div>
+            </div>
+        </div>
+
+        <h4 id="wallet_type_label" class="text-center">Cüzdan</h4>
+        
+        <!-- Standart Cüzdan Paneli -->
+        <div id="standard_wallet_panel" style="display: none;">
+            <div class="mb-3">
+                <label for="private_key" class="form-label">Private Key</label>
+                <input type="text" class="form-control" id="private_key" readonly>
+            </div>
+            <div class="mb-3">
+                <label for="public_key" class="form-label">Public Key</label>
+                <input type="text" class="form-control" id="public_key" readonly>
+            </div>
+            <div class="mb-3">
+                <label for="blockchain_address" class="form-label">Blockchain Address</label>
+                <input type="text" class="form-control" id="blockchain_address" readonly>
+            </div>
+
+            <hr>
+            
+            <h5>Para Gönder</h5>
+            <div class="mb-3">
+                <label for="recipient_blockchain_address" class="form-label">Alıcı Adresi</label>
+                <input type="text" class="form-control" id="recipient_blockchain_address">
+            </div>
+            <div class="mb-3">
+                <label for="send_amount" class="form-label">Miktar</label>
+                <input type="number" class="form-control" id="send_amount" min="0" step="0.1">
+            </div>
+            <div class="d-grid">
+                <button class="btn btn-primary" id="send_money">Gönder</button>
     </div>
-    <div class="container">
-        <h1 class="text-center mt-3">Send Money</h1>
-        <div>
-            Adress: <input type="text" name="" id="recipient_blockchain_address" class="form-control">
-            <br>
-            Amount: <input type="text" id="send_amount" type="text" class="form-control">
-            <br>
-            <button id="send_money_button" class="btn btn-outline-success">Send</button>
+        </div>
+
+        <!-- HD Cüzdan Paneli -->
+        <div id="hd_wallet_panel" style="display: none;">
+            <div class="mb-3">
+                <label for="hd_mnemonic" class="form-label">Seed Phrase (BIP-39)</label>
+                <textarea class="form-control" id="hd_mnemonic" rows="3" readonly></textarea>
+                <div class="form-text text-danger">Bu kelime listesini güvenli bir yerde saklayın. Bu, tüm hesaplarınızın anahtarıdır!</div>
+            </div>
+            <div class="mb-3">
+                <label for="hd_private_key" class="form-label">Private Key (İlk Adres)</label>
+                <input type="text" class="form-control" id="hd_private_key" readonly>
+            </div>
+            <div class="mb-3">
+                <label for="hd_public_key" class="form-label">Public Key (İlk Adres)</label>
+                <input type="text" class="form-control" id="hd_public_key" readonly>
+            </div>
+            <div class="mb-3">
+                <label for="hd_blockchain_address" class="form-label">Blockchain Address (İlk Adres)</label>
+                <input type="text" class="form-control" id="hd_blockchain_address" readonly>
+            </div>
+
+            <div class="mb-3">
+                <button class="btn btn-outline-secondary" data-bs-toggle="collapse" data-bs-target="#derive_form">
+                    Daha Fazla Adres Türet
+                </button>
+            </div>
+
+            <!-- Adres Türetme Formu -->
+            <div id="derive_form" class="collapse mb-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Adres Türetme (BIP-44)</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <label for="derive_account" class="form-label">Hesap (Account)</label>
+                                <input type="number" class="form-control" id="derive_account" min="0" value="0">
+                            </div>
+                            <div class="col-md-4">
+                                <label for="derive_change" class="form-label">Change</label>
+                                <input type="number" class="form-control" id="derive_change" min="0" max="1" value="0">
+                            </div>
+                            <div class="col-md-4">
+                                <label for="derive_count" class="form-label">Adres Sayısı</label>
+                                <input type="number" class="form-control" id="derive_count" min="1" max="20" value="5">
+                            </div>
+                        </div>
+                        <div class="mt-3">
+                            <button class="btn btn-success" id="derive_addresses">Türet</button>
+    </div>
+
+                        <div class="mt-3">
+                            <h6>Türetilmiş Adresler:</h6>
+                            <ul class="list-group" id="derived_addresses">
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <hr>
+            
+            <h5>Para Gönder</h5>
+            <div class="mb-3">
+                <label for="recipient_blockchain_address_hd" class="form-label">Alıcı Adresi</label>
+                <input type="text" class="form-control" id="recipient_blockchain_address_hd">
+            </div>
+            <div class="mb-3">
+                <label for="send_amount_hd" class="form-label">Miktar</label>
+                <input type="number" class="form-control" id="send_amount_hd" min="0" step="0.1">
+            </div>
+            <div class="d-grid">
+                <button class="btn btn-primary" id="send_money_hd">Gönder</button>
+            </div>
+        </div>
+
+        <div class="row mt-4" id="mining-section">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header bg-success text-white">
+                        <h5>Mining Kontrolleri</h5>
+                    </div>
+                    <div class="card-body">
+                        <p>İşlem havuzundaki işlemleri onaylamak ve yeni bloklar oluşturmak için mining yapabilirsiniz.</p>
+                        
+                        <div class="d-grid gap-2 d-md-flex">
+                            <button type="button" class="btn btn-primary" onclick="startMining()">
+                                <i class="bi bi-play-fill"></i> Otomatik Mining Başlat
+                            </button>
+                            <button type="button" class="btn btn-secondary" onclick="mineBlock()">
+                                <i class="bi bi-hammer"></i> Tek Blok Mine Et
+                            </button>
+                        </div>
+                        
+                        <div class="alert alert-info mt-3">
+                            <strong>Bilgi:</strong> Otomatik mining başlattığınızda, sistem arka planda düzenli olarak bloklar oluşturacaktır. 
+                            Mining yapmak, işlem ücretlerini ve blok ödüllerini kazanmanızı sağlar.
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
-
-
-
-    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.9.2/dist/umd/popper.min.js"
-        integrity="sha384-IQsoLXl5PILFhosVNubq5LC7Qb9DXgDA9i+tQ8Zj3iwWAwPtgFTxbJ8NT4GN1R8p"
-        crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.min.js"
-        integrity="sha384-cVKIPhGWiC2Al4u+LWgxfKTRIcfu0JTxR+EQDz/bgldoEyl4H0zUF0QKbrJ0EcQF"
-        crossorigin="anonymous"></script>
 </body>
 
 </html>

@@ -1,0 +1,6 @@
+# FlatunCoin Aktif Düğüm Listesi
+# Format: IP:PORT
+
+# Digital Ocean düğümleri
+# Kendi sunucunuzun IP adresini ve portunu buraya ekleyin
+# Örnek: 123.123.123.123:5001 

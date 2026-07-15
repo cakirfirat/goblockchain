@@ -21,6 +21,11 @@ const (
 	MINING_REWARD     = 1.0
 	MINING_TIMER_SEC  = 20
 
+	// Dinamik zorluk ayarları
+	TARGET_BLOCK_TIME_SEC          = 10 * 60 // 10 dakika
+	DIFFICULTY_ADJUSTMENT_INTERVAL = 10      // Her 10 blokta bir difficulty yeniden hesaplanır
+	MAX_DIFFICULTY_ADJUSTMENT      = 4       // Bir sonraki ayarlamada maksimum zorluk değişimi yüzdesi
+
 	BLOCKCHAIN_PORT_RANGE_START      = 5001
 	BLOCKCHAIN_PORT_RANGE_END        = 5003
 	NEIGHBOR_IP_RANGE_START          = 0
@@ -33,14 +38,18 @@ type Block struct {
 	nonce        int
 	previousHash [32]byte
 	transactions []*Transaction
+	difficulty   int   // Blok oluşturulduğundaki zorluk seviyesi
+	miningTime   int64 // Blok mining sürecinin ne kadar sürdüğü
 }
 
-func NewBlock(nonce int, previousHash [32]byte, transactions []*Transaction) *Block {
+func NewBlock(nonce int, previousHash [32]byte, transactions []*Transaction, difficulty int, miningTime int64) *Block {
 	b := new(Block)
 	b.timestamp = time.Now().UnixNano()
 	b.nonce = nonce
 	b.previousHash = previousHash
 	b.transactions = transactions
+	b.difficulty = difficulty
+	b.miningTime = miningTime
 	return b
 }
 
@@ -56,10 +65,20 @@ func (b *Block) Transactions() []*Transaction {
 	return b.transactions
 }
 
+func (b *Block) Difficulty() int {
+	return b.difficulty
+}
+
+func (b *Block) MiningTime() int64 {
+	return b.miningTime
+}
+
 func (b *Block) Print() {
 	fmt.Printf("timestamp       %d\n", b.timestamp)
 	fmt.Printf("nonce           %d\n", b.nonce)
 	fmt.Printf("previous_hash   %x\n", b.previousHash)
+	fmt.Printf("difficulty      %d\n", b.difficulty)
+	fmt.Printf("mining_time     %d ms\n", b.miningTime/1000000)
 	for _, t := range b.transactions {
 		t.Print()
 	}
@@ -76,11 +95,15 @@ func (b *Block) MarshalJSON() ([]byte, error) {
 		Nonce        int            `json:"nonce"`
 		PreviousHash string         `json:"previous_hash"`
 		Transactions []*Transaction `json:"transactions"`
+		Difficulty   int            `json:"difficulty"`
+		MiningTime   int64          `json:"mining_time"`
 	}{
 		Timestamp:    b.timestamp,
 		Nonce:        b.nonce,
 		PreviousHash: fmt.Sprintf("%x", b.previousHash),
 		Transactions: b.transactions,
+		Difficulty:   b.difficulty,
+		MiningTime:   b.miningTime,
 	})
 }
 
@@ -91,11 +114,15 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 		Nonce        *int            `json:"nonce"`
 		PreviousHash *string         `json:"previous_hash"`
 		Transactions *[]*Transaction `json:"transactions"`
+		Difficulty   *int            `json:"difficulty"`
+		MiningTime   *int64          `json:"mining_time"`
 	}{
 		Timestamp:    &b.timestamp,
 		Nonce:        &b.nonce,
 		PreviousHash: &previousHash,
 		Transactions: &b.transactions,
+		Difficulty:   &b.difficulty,
+		MiningTime:   &b.miningTime,
 	}
 	if err := json.Unmarshal(data, &v); err != nil {
 		return err
@@ -114,12 +141,16 @@ type Blockchain struct {
 
 	neighbors    []string
 	muxNeighbors sync.Mutex
+
+	currentDifficulty int   // Mevcut zorluk seviyesi
+	lastMiningTime    int64 // Son mining süresini tutan değişken
 }
 
 func NewBlockchain(blockchainAddress string, port uint16) *Blockchain {
 	b := &Block{}
 	bc := new(Blockchain)
 	bc.blockchainAddress = blockchainAddress
+	bc.currentDifficulty = MINING_DIFFICULTY
 	bc.CreateBlock(0, b.Hash())
 	bc.port = port
 	return bc
@@ -183,9 +214,13 @@ func (bc *Blockchain) UnmarshalJSON(data []byte) error {
 }
 
 func (bc *Blockchain) CreateBlock(nonce int, previousHash [32]byte) *Block {
-	b := NewBlock(nonce, previousHash, bc.transactionPool)
+	b := NewBlock(nonce, previousHash, bc.transactionPool, bc.currentDifficulty, bc.lastMiningTime)
 	bc.chain = append(bc.chain, b)
 	bc.transactionPool = []*Transaction{}
+
+	// Yeni blok oluşturulduktan sonra difficulty ayarlaması yap
+	bc.currentDifficulty = bc.AdjustDifficulty()
+
 	for _, n := range bc.neighbors {
 		endpoint := fmt.Sprintf("http://%s/transactions", n)
 		client := &http.Client{}
@@ -274,21 +309,33 @@ func (bc *Blockchain) CopyTransactionPool() []*Transaction {
 	return transactions
 }
 
-func (bc *Blockchain) ValidProof(nonce int, previousHash [32]byte, transactions []*Transaction, difficulty int) bool {
-	zeros := strings.Repeat("0", difficulty)
-	guessBlock := Block{0, nonce, previousHash, transactions}
-	guessHashStr := fmt.Sprintf("%x", guessBlock.Hash())
-	return guessHashStr[:difficulty] == zeros
-}
+// Mining süresini tutmak için değişken
+var lastMiningStart int64
 
 func (bc *Blockchain) ProofOfWork() int {
 	transactions := bc.CopyTransactionPool()
 	previousHash := bc.LastBlock().Hash()
 	nonce := 0
-	for !bc.ValidProof(nonce, previousHash, transactions, MINING_DIFFICULTY) {
+
+	// Mining başlangıç zamanını kaydet
+	lastMiningStart = time.Now().UnixNano()
+
+	for !bc.ValidProof(nonce, previousHash, transactions, bc.currentDifficulty) {
 		nonce += 1
 	}
+
+	// Mining süresini hesapla ve kaydet
+	bc.lastMiningTime = time.Now().UnixNano() - lastMiningStart
+	log.Printf("Mining completed in %d ms with difficulty %d", bc.lastMiningTime/1000000, bc.currentDifficulty)
+
 	return nonce
+}
+
+func (bc *Blockchain) ValidProof(nonce int, previousHash [32]byte, transactions []*Transaction, difficulty int) bool {
+	zeros := strings.Repeat("0", difficulty)
+	guessBlock := Block{0, nonce, previousHash, transactions, difficulty, 0}
+	guessHashStr := fmt.Sprintf("%x", guessBlock.Hash())
+	return guessHashStr[:difficulty] == zeros
 }
 
 func (bc *Blockchain) Mining() bool {
@@ -347,7 +394,8 @@ func (bc *Blockchain) ValidChain(chain []*Block) bool {
 			return false
 		}
 
-		if !bc.ValidProof(b.Nonce(), b.PreviousHash(), b.Transactions(), MINING_DIFFICULTY) {
+		// Geçerli bloğun kendi zorluk seviyesiyle doğrulanması
+		if !bc.ValidProof(b.Nonce(), b.PreviousHash(), b.Transactions(), b.Difficulty()) {
 			return false
 		}
 
@@ -461,4 +509,49 @@ func (ar *AmountResponse) MarshalJSON() ([]byte, error) {
 	}{
 		Amount: ar.Amount,
 	})
+}
+
+// Dinamik difficulty ayarlamak için yeni metot
+func (bc *Blockchain) AdjustDifficulty() int {
+	// Eğer yeterli blok yoksa veya ayarlama aralığında değilse, mevcut değeri kullan
+	if len(bc.chain) < DIFFICULTY_ADJUSTMENT_INTERVAL || len(bc.chain)%DIFFICULTY_ADJUSTMENT_INTERVAL != 0 {
+		return bc.currentDifficulty
+	}
+
+	// Son blok dizini
+	lastIndex := len(bc.chain) - 1
+	// Karşılaştırma için interval öncesi bloğu al
+	prevAdjustmentBlock := bc.chain[lastIndex-(DIFFICULTY_ADJUSTMENT_INTERVAL-1)]
+	// Son bloğu al
+	lastBlock := bc.chain[lastIndex]
+
+	// İki blok arasında geçen süreyi hesapla (nanosaniye)
+	timeExpected := int64(TARGET_BLOCK_TIME_SEC * DIFFICULTY_ADJUSTMENT_INTERVAL * 1000000000)
+	timeActual := lastBlock.timestamp - prevAdjustmentBlock.timestamp
+
+	// Eğer süre beklenenin çok altında kaldıysa zorluğu artır
+	if timeActual < timeExpected/2 {
+		// Zorluğu artır ama maksimum ayarlama sınırını aşma
+		newDifficulty := bc.currentDifficulty + 1
+		log.Printf("Difficulty increased: %d -> %d", bc.currentDifficulty, newDifficulty)
+		return newDifficulty
+	}
+
+	// Eğer süre beklenenin çok üstündeyse zorluğu azalt
+	if timeActual > timeExpected*2 {
+		// Zorluğu azalt ama 1'in altına düşme
+		if bc.currentDifficulty > 1 {
+			newDifficulty := bc.currentDifficulty - 1
+			log.Printf("Difficulty decreased: %d -> %d", bc.currentDifficulty, newDifficulty)
+			return newDifficulty
+		}
+	}
+
+	// Değişiklik gerekmiyorsa mevcut değeri döndür
+	return bc.currentDifficulty
+}
+
+// GetBlocks returns all blocks in the blockchain
+func (bc *Blockchain) GetBlocks() []*Block {
+	return bc.chain
 }

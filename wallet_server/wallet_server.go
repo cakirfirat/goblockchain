@@ -57,14 +57,144 @@ func (ws *WalletServer) Wallet(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case http.MethodPost:
 		w.Header().Add("Content-Type", "application/json")
-		myWallet := wallet.NewWallet()
-		m, _ := myWallet.MarshalJSON()
-		io.WriteString(w, string(m[:]))
+
+		// HD cüzdan veya normal cüzdan oluşturup oluşturmama durumu
+		walletType := req.URL.Query().Get("type")
+		var walletData []byte
+		var err error
+
+		if walletType == "hd" {
+			// HD cüzdan oluşturma
+			hdWallet := wallet.NewHDWallet()
+			walletData, err = hdWallet.MarshalJSON()
+		} else {
+			// Standart cüzdan oluşturma (geriye dönük uyumluluk)
+			myWallet := wallet.NewWallet()
+			walletData, err = myWallet.MarshalJSON()
+		}
+
+		if err != nil {
+			log.Printf("ERROR: Wallet marshal failed - %s", err.Error())
+			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+
+		io.WriteString(w, string(walletData[:]))
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		log.Println("ERROR: Invalid http method")
 	}
 }
+
+// ImportHDWallet, mevcut bir seed phrase ile HD cüzdan oluşturma
+func (ws *WalletServer) ImportHDWallet(w http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodPost:
+		w.Header().Add("Content-Type", "application/json")
+
+		// İstek gövdesini ayrıştır
+		decoder := json.NewDecoder(req.Body)
+		var hdWalletRequest struct {
+			Mnemonic   string `json:"mnemonic"`
+			Passphrase string `json:"passphrase,omitempty"`
+		}
+
+		err := decoder.Decode(&hdWalletRequest)
+		if err != nil {
+			log.Printf("ERROR: %v", err)
+			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+
+		// Mnemonic boş olmamalı
+		if hdWalletRequest.Mnemonic == "" {
+			log.Println("ERROR: Mnemonic is required")
+			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+
+		// HD cüzdan oluştur
+		hdWallet := wallet.NewHDWalletFromMnemonic(hdWalletRequest.Mnemonic, hdWalletRequest.Passphrase)
+		walletData, err := hdWallet.MarshalJSON()
+
+		if err != nil {
+			log.Printf("ERROR: Wallet marshal failed - %s", err.Error())
+			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+
+		io.WriteString(w, string(walletData[:]))
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		log.Println("ERROR: Invalid HTTP Method")
+	}
+}
+
+// DeriveAddresses, bir HD cüzdandan belirli sayıda adres türetme
+func (ws *WalletServer) DeriveAddresses(w http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodPost:
+		w.Header().Add("Content-Type", "application/json")
+
+		// İstek gövdesini ayrıştır
+		decoder := json.NewDecoder(req.Body)
+		var deriveRequest struct {
+			Mnemonic     string `json:"mnemonic"`
+			Passphrase   string `json:"passphrase,omitempty"`
+			Account      uint32 `json:"account,omitempty"`
+			Change       uint32 `json:"change,omitempty"`
+			AddressCount uint32 `json:"address_count"`
+		}
+
+		err := decoder.Decode(&deriveRequest)
+		if err != nil {
+			log.Printf("ERROR: %v", err)
+			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+
+		// Mnemonic boş olmamalı
+		if deriveRequest.Mnemonic == "" {
+			log.Println("ERROR: Mnemonic is required")
+			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+
+		// Adres sayısı default 1, maksimum 20 olabilir
+		if deriveRequest.AddressCount == 0 {
+			deriveRequest.AddressCount = 1
+		} else if deriveRequest.AddressCount > 20 {
+			deriveRequest.AddressCount = 20
+		}
+
+		// HD cüzdan oluştur
+		hdWallet := wallet.NewHDWalletFromMnemonic(deriveRequest.Mnemonic, deriveRequest.Passphrase)
+
+		// Belirlenen sayıda adres türet
+		addresses := hdWallet.DeriveAddresses(deriveRequest.Account, deriveRequest.Change, deriveRequest.AddressCount)
+
+		// Yanıt oluştur
+		response, err := json.Marshal(struct {
+			Message   string   `json:"message"`
+			Addresses []string `json:"addresses"`
+		}{
+			Message:   "success",
+			Addresses: addresses,
+		})
+
+		if err != nil {
+			log.Printf("ERROR: Response marshal failed - %s", err.Error())
+			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+
+		io.WriteString(w, string(response[:]))
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		log.Println("ERROR: Invalid HTTP Method")
+	}
+}
+
 func (ws *WalletServer) CreateTransaction(w http.ResponseWriter, req *http.Request) {
 
 	switch req.Method {
@@ -128,6 +258,72 @@ func (ws *WalletServer) CreateTransaction(w http.ResponseWriter, req *http.Reque
 
 }
 
+// CreateHDTransaction, HD cüzdan kullanarak işlem oluşturma
+func (ws *WalletServer) CreateHDTransaction(w http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodPost:
+		decoder := json.NewDecoder(req.Body)
+		var t struct {
+			Mnemonic                   string  `json:"mnemonic"`
+			Passphrase                 string  `json:"passphrase,omitempty"`
+			RecipientBlockchainAddress string  `json:"recipient_blockchain_address"`
+			Value                      float32 `json:"value"`
+		}
+
+		err := decoder.Decode(&t)
+		if err != nil {
+			log.Printf("ERROR: %v", err)
+			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+
+		// Mnemonic ve alıcı adresi boş olmamalı
+		if t.Mnemonic == "" || t.RecipientBlockchainAddress == "" {
+			log.Println("ERROR: missing mnemonic or recipient address")
+			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+
+		// HD cüzdan oluştur
+		hdWallet := wallet.NewHDWalletFromMnemonic(t.Mnemonic, t.Passphrase)
+
+		// İşlem oluştur
+		transaction := hdWallet.CreateTransaction(t.RecipientBlockchainAddress, t.Value)
+		signature := transaction.GenerateSignature()
+		signatureStr := signature.String()
+
+		// Blockchain sunucusuna gönder
+		pubKeyStr := hdWallet.PublicKeyStr()
+		bt := &block.TransactionRequest{
+			&hdWallet.BlockchainAddress,
+			&t.RecipientBlockchainAddress,
+			&pubKeyStr,
+			&t.Value,
+			&signatureStr,
+		}
+
+		m, _ := json.Marshal(bt)
+		buf := bytes.NewBuffer(m)
+		resp, err := http.Post(ws.Gateway()+"/transactions", "application/json", buf)
+		if err != nil {
+			log.Printf("ERROR: %v", err)
+			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+
+		w.Header().Add("Content-Type", "application/json")
+		if resp.StatusCode == 201 {
+			io.WriteString(w, string(utils.JsonStatus("success")))
+			return
+		}
+		io.WriteString(w, string(utils.JsonStatus("fail")))
+
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		log.Println("ERROR: Invalid HTTP Method")
+	}
+}
+
 func (ws *WalletServer) WalletAmount(w http.ResponseWriter, req *http.Request) {
 
 	switch req.Method {
@@ -184,5 +380,11 @@ func (ws *WalletServer) Run() {
 	http.HandleFunc("/wallet", ws.Wallet)
 	http.HandleFunc("/wallet/amount", ws.WalletAmount)
 	http.HandleFunc("/transaction", ws.CreateTransaction)
+
+	// Yeni HD cüzdan endpointleri
+	http.HandleFunc("/wallet/hd/import", ws.ImportHDWallet)
+	http.HandleFunc("/wallet/hd/derive", ws.DeriveAddresses)
+	http.HandleFunc("/transaction/hd", ws.CreateHDTransaction)
+
 	log.Fatal(http.ListenAndServe("0.0.0.0:"+strconv.Itoa(int(ws.Port())), nil))
 }

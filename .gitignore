@@ -1,0 +1,12 @@
+# Derleme çıktıları
+build/
+wallet_server/wallet_server
+*.exe
+
+# Çalışma zamanı verileri
+data/
+output.txt
+local_node_output.txt
+
+# Sistem dosyaları
+.DS_Store
