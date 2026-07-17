@@ -19,7 +19,8 @@ import (
 func main() {
 	walletFile := flag.String("wallet", "", "Cüzdan dosyası (private_key/public_key/blockchain_address JSON)")
 	to := flag.String("to", "", "Alıcı blockchain adresi")
-	amount := flag.Float64("amount", 1.0, "Gönderilecek miktar")
+	amount := flag.String("amount", "1", "Gönderilecek miktar (FLATUN, örn. 1.5)")
+	fee := flag.String("fee", "0", "İşlem ücreti (FLATUN)")
 	flag.Parse()
 
 	if *walletFile == "" || *to == "" {
@@ -43,8 +44,16 @@ func main() {
 	publicKey := utils.PublicKeyFromString(w.PublicKey)
 	privateKey := utils.PrivateKeyFromString(w.PrivateKey, publicKey)
 
-	value := float32(*amount)
-	t := wallet.NewTransaction(privateKey, publicKey, w.BlockchainAddress, *to, value)
+	value, err := utils.ParseFLATUN(*amount)
+	if err != nil {
+		log.Fatalf("Geçersiz --amount: %v", err)
+	}
+	feeUnits, err := utils.ParseFLATUN(*fee)
+	if err != nil {
+		log.Fatalf("Geçersiz --fee: %v", err)
+	}
+
+	t := wallet.NewTransactionWithFee(privateKey, publicKey, w.BlockchainAddress, *to, value, feeUnits)
 	signatureStr := t.GenerateSignature().String()
 	timestamp := t.Timestamp()
 
@@ -53,6 +62,7 @@ func main() {
 		RecipientBlockchainAddress: to,
 		SenderPublicKey:            &w.PublicKey,
 		Value:                      &value,
+		Fee:                        &feeUnits,
 		Timestamp:                  &timestamp,
 		Signature:                  &signatureStr,
 	}

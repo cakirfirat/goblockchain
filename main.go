@@ -2,6 +2,7 @@ package main
 
 import (
 	"blockchain/block"
+	"blockchain/utils"
 	"blockchain/wallet"
 	"fmt"
 	"log"
@@ -18,18 +19,19 @@ func main() {
 	walletB := wallet.NewWallet()
 
 	//WALLET
-	t := wallet.NewTransaction(walletA.PrivateKey(), walletA.PublicKey(), walletA.BlockchainAddress(), walletB.BlockchainAddress(), 1.0)
+	oneFlatun := utils.UNITS_PER_FLATUN
+	t := wallet.NewTransaction(walletA.PrivateKey(), walletA.PublicKey(), walletA.BlockchainAddress(), walletB.BlockchainAddress(), oneFlatun)
 
 	//Blockchain
 	blockchain := block.NewBlockchain(walletM.BlockchainAddress(), 8080)
-	isAdded := blockchain.AddTransaction(walletA.BlockchainAddress(), walletB.BlockchainAddress(), 1.0,
-		t.Timestamp(), walletA.PublicKey(), t.GenerateSignature())
+	isAdded := blockchain.AddTransaction(walletA.BlockchainAddress(), walletB.BlockchainAddress(), oneFlatun,
+		0, t.Timestamp(), walletA.PublicKey(), t.GenerateSignature())
 	fmt.Println("Added ?", isAdded)
 
 	blockchain.Mining()
 	blockchain.Print()
-	fmt.Printf("A %.1f\n", blockchain.CalculateTotalAmount(walletA.BlockchainAddress()))
-	fmt.Printf("B %.1f\n", blockchain.CalculateTotalAmount(walletB.BlockchainAddress()))
-	fmt.Printf("M %.1f\n", blockchain.CalculateTotalAmount(walletM.BlockchainAddress()))
+	fmt.Printf("A %s\n", utils.FormatFLATUN(blockchain.CalculateTotalAmount(walletA.BlockchainAddress())))
+	fmt.Printf("B %s\n", utils.FormatFLATUN(blockchain.CalculateTotalAmount(walletB.BlockchainAddress())))
+	fmt.Printf("M %s\n", utils.FormatFLATUN(blockchain.CalculateTotalAmount(walletM.BlockchainAddress())))
 
 }

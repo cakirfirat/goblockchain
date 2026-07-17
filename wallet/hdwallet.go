@@ -3,18 +3,16 @@ package wallet
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 
 	"blockchain/utils"
 
-	"github.com/btcsuite/btcutil/base58"
 	"github.com/tyler-smith/go-bip32"
 	"github.com/tyler-smith/go-bip39"
-	"golang.org/x/crypto/ripemd160"
 )
 
 // HDWallet, BIP-32, BIP-39 ve BIP-44 standartlarına uygun Hierarchical Deterministic (HD) cüzdan yapısı
@@ -84,30 +82,8 @@ func NewHDWalletFromMnemonic(mnemonic string, passphrase string) *HDWallet {
 	// ECDSA özel anahtarı BIP-32 özel anahtarından oluştur
 	prvKey, pubKey := btcKeyToEcdsa(addressKey)
 
-	// Blockchain adresi oluştur (mevcut sistemdeki gibi)
-	h2 := sha256.New()
-	h2.Write(pubKey.X.Bytes())
-	h2.Write(pubKey.Y.Bytes())
-	digest2 := h2.Sum(nil)
-	h3 := ripemd160.New()
-	h3.Write(digest2)
-	digest3 := h3.Sum(nil)
-
-	// Adres oluşturma
-	vd4 := make([]byte, 21)
-	vd4[0] = 0x00
-	copy(vd4[1:], digest3[:])
-	h5 := sha256.New()
-	h5.Write(vd4)
-	digest5 := h5.Sum(nil)
-	h6 := sha256.New()
-	h6.Write(digest5)
-	digest6 := h6.Sum(nil)
-	chsum := digest6[:4]
-	dc8 := make([]byte, 25)
-	copy(dc8[:21], vd4[:])
-	copy(dc8[21:], chsum[:])
-	address := base58.Encode(dc8)
+	// Blockchain adresi oluştur (node ile aynı türetme: utils.AddressFromPublicKey)
+	address := utils.AddressFromPublicKey(pubKey)
 
 	return &HDWallet{
 		Seed:              seed,
@@ -138,29 +114,7 @@ func (w *HDWallet) DerivePath(account, change, addressIndex uint32) (string, *ec
 	addressKey, _ := changeKey.NewChildKey(addressIndex)
 
 	prvKey, pubKey := btcKeyToEcdsa(addressKey)
-
-	// Adres oluştur
-	h2 := sha256.New()
-	h2.Write(pubKey.X.Bytes())
-	h2.Write(pubKey.Y.Bytes())
-	digest2 := h2.Sum(nil)
-	h3 := ripemd160.New()
-	h3.Write(digest2)
-	digest3 := h3.Sum(nil)
-	vd4 := make([]byte, 21)
-	vd4[0] = 0x00
-	copy(vd4[1:], digest3[:])
-	h5 := sha256.New()
-	h5.Write(vd4)
-	digest5 := h5.Sum(nil)
-	h6 := sha256.New()
-	h6.Write(digest5)
-	digest6 := h6.Sum(nil)
-	chsum := digest6[:4]
-	dc8 := make([]byte, 25)
-	copy(dc8[:21], vd4[:])
-	copy(dc8[21:], chsum[:])
-	address := base58.Encode(dc8)
+	address := utils.AddressFromPublicKey(pubKey)
 
 	return address, prvKey, pubKey
 }
@@ -180,13 +134,26 @@ func (w *HDWallet) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// btcKeyToEcdsa, BIP-32 anahtarını ECDSA özel/açık anahtar çiftine dönüştürür
+// btcKeyToEcdsa, BIP-32 anahtar baytlarını P-256 ECDSA anahtar çiftine dönüştürür.
+//
+// NOT (bilinçli tasarım kararı, Temmuz 2026): FlatunChain P-256 eğrisinde
+// standartlaşmıştır. BIP-32 türetmesinden gelen baytlar deterministik tohum
+// olarak kullanılır ve P-256 mertebesine indirgenir (d ∈ [1, N-1] garanti);
+// mnemonic yalnızca FlatunChain cüzdanlarında geri yüklenebilir, bu kabul
+// edilmiş bir sınırlamadır.
 func btcKeyToEcdsa(key *bip32.Key) (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
-	privateKeyBytes := key.Key
+	curve := elliptic.P256()
+
+	// d = (bytes mod (N-1)) + 1 — geçersiz (0 veya ≥N) anahtar imkânsız hale gelir
+	d := utils.BytesToBigInt(key.Key)
+	nMinusOne := new(big.Int).Sub(curve.Params().N, big.NewInt(1))
+	d.Mod(d, nMinusOne)
+	d.Add(d, big.NewInt(1))
+
 	privateKey := new(ecdsa.PrivateKey)
-	privateKey.PublicKey.Curve = elliptic.P256()
-	privateKey.D = utils.BytesToBigInt(privateKeyBytes)
-	privateKey.PublicKey.X, privateKey.PublicKey.Y = privateKey.PublicKey.Curve.ScalarBaseMult(privateKeyBytes)
+	privateKey.PublicKey.Curve = curve
+	privateKey.D = d
+	privateKey.PublicKey.X, privateKey.PublicKey.Y = curve.ScalarBaseMult(d.Bytes())
 	return privateKey, &privateKey.PublicKey
 }
 
@@ -205,7 +172,7 @@ func (w *HDWallet) GetSeedHex() string {
 	return hex.EncodeToString(w.Seed)
 }
 
-// CreateTransaction, HD cüzdan kullanarak işlem oluşturur
-func (w *HDWallet) CreateTransaction(recipientAddress string, value float32) *Transaction {
+// CreateTransaction, HD cüzdan kullanarak işlem oluşturur (value: alt birim)
+func (w *HDWallet) CreateTransaction(recipientAddress string, value int64) *Transaction {
 	return NewTransaction(w.PrivateKey, w.PublicKey, w.BlockchainAddress, recipientAddress, value)
 }

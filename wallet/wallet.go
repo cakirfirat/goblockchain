@@ -10,9 +10,6 @@ import (
 	"time"
 
 	"blockchain/utils"
-
-	"github.com/btcsuite/btcutil/base58"
-	"golang.org/x/crypto/ripemd160"
 )
 
 type Wallet struct {
@@ -22,37 +19,12 @@ type Wallet struct {
 }
 
 func NewWallet() *Wallet {
-
 	w := new(Wallet)
 	privateKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	w.privateKey = privateKey
 	w.publicKey = &w.privateKey.PublicKey
-
-	h2 := sha256.New()
-	h2.Write(w.publicKey.X.Bytes())
-	h2.Write(w.publicKey.Y.Bytes())
-	digest2 := h2.Sum(nil)
-	h3 := ripemd160.New()
-	h3.Write(digest2)
-	digest3 := h3.Sum(nil)
-	vd4 := make([]byte, 21)
-	vd4[0] = 0x00
-	copy(vd4[1:], digest3[:])
-	h5 := sha256.New()
-	h5.Write(vd4)
-	digest5 := h5.Sum(nil)
-	h6 := sha256.New()
-	h6.Write(digest5)
-	digest6 := h6.Sum(nil)
-	chsum := digest6[:4]
-	dc8 := make([]byte, 25)
-	copy(dc8[:21], vd4[:])
-	copy(dc8[21:], chsum[:])
-
-	address := base58.Encode(dc8)
-	w.blockchainAdress = address
+	w.blockchainAdress = utils.AddressFromPublicKey(w.publicKey)
 	return w
-
 }
 
 func (w *Wallet) PrivateKey() *ecdsa.PrivateKey {
@@ -93,18 +65,25 @@ func (w *Wallet) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// Transaction: tutar int64 ALT BİRİMDİR (1 FLATUN = 1e8; bkz. utils.UNITS_PER_FLATUN)
 type Transaction struct {
 	senderPrivateKey           *ecdsa.PrivateKey
 	senderPublicKey            *ecdsa.PublicKey
 	senderBlockchainAddress    string
 	recipientBlockchainAddress string
-	value                      float32
+	value                      int64
+	fee                        int64
 	timestamp                  int64
 }
 
 func NewTransaction(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey,
-	sender string, recipient string, value float32) *Transaction {
-	return &Transaction{privateKey, publicKey, sender, recipient, value, time.Now().UnixNano()}
+	sender string, recipient string, value int64) *Transaction {
+	return NewTransactionWithFee(privateKey, publicKey, sender, recipient, value, 0)
+}
+
+func NewTransactionWithFee(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey,
+	sender string, recipient string, value int64, fee int64) *Transaction {
+	return &Transaction{privateKey, publicKey, sender, recipient, value, fee, time.Now().UnixNano()}
 }
 
 // Timestamp, imzaya dahil edilen zaman damgası; node tarafında replay
@@ -113,28 +92,37 @@ func (t *Transaction) Timestamp() int64 {
 	return t.timestamp
 }
 
-func (t *Transaction) GenerateSignature() *utils.Signature {
-	m, _ := json.Marshal(t)
-	h := sha256.Sum256([]byte(m))
-	r, s, _ := ecdsa.Sign(rand.Reader, t.senderPrivateKey, h[:])
-	return &utils.Signature{R: r, S: s}
-
+func (t *Transaction) Fee() int64 {
+	return t.fee
 }
 
-// MarshalJSON, block.Transaction ile ALAN SIRASI DAHİL birebir aynı JSON üretmelidir;
-// imza bu çıktı üzerinden atılır ve node aynı çıktıyı yeniden kurup doğrular
-func (t *Transaction) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
-		Sender    string  `json:"sender_blockchain_address"`
-		Recipient string  `json:"recipient_blockchain_address"`
-		Value     float32 `json:"value"`
-		Timestamp int64   `json:"timestamp"`
+func (t *Transaction) GenerateSignature() *utils.Signature {
+	h := sha256.Sum256(t.signingPayload())
+	r, s, _ := ecdsa.Sign(rand.Reader, t.senderPrivateKey, h[:])
+	return &utils.Signature{R: r, S: s}
+}
+
+// signingPayload, block.Transaction.SigningPayload ile ALAN SIRASI DAHİL
+// birebir aynı JSON'u üretmek ZORUNDADIR; imza bu çıktı üzerinden atılır
+// ve node aynı çıktıyı yeniden kurup doğrular. Ağ kimliği (NetworkID)
+// zincirler arası replay'i engeller.
+func (t *Transaction) signingPayload() []byte {
+	m, _ := json.Marshal(struct {
+		Network   string `json:"network"`
+		Sender    string `json:"sender_blockchain_address"`
+		Recipient string `json:"recipient_blockchain_address"`
+		Value     int64  `json:"value"`
+		Fee       int64  `json:"fee"`
+		Timestamp int64  `json:"timestamp"`
 	}{
+		Network:   utils.NetworkID,
 		Sender:    t.senderBlockchainAddress,
 		Recipient: t.recipientBlockchainAddress,
 		Value:     t.value,
+		Fee:       t.fee,
 		Timestamp: t.timestamp,
 	})
+	return m
 }
 
 type TransactionRequest struct {

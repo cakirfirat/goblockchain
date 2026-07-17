@@ -216,27 +216,28 @@ func (ws *WalletServer) CreateTransaction(w http.ResponseWriter, req *http.Reque
 
 		publicKey := utils.PublicKeyFromString(*t.SenderPublicKey)
 		privateKey := utils.PrivateKeyFromString(*t.SenderPrivateKey, publicKey)
-		value, err := strconv.ParseFloat(*t.Value, 32)
+		valueUnits, err := utils.ParseFLATUN(*t.Value)
 		if err != nil {
-			log.Println("ERROR: parse error")
+			log.Printf("ERROR: tutar çözümlenemedi: %v", err)
 			io.WriteString(w, string(utils.JsonStatus("fail")))
 			return
 		}
-		value32 := float32(value)
 
 		w.Header().Add("Content-Type", "application/json")
 
 		transaction := wallet.NewTransaction(privateKey, publicKey,
-			*t.SenderBlockchainAddress, *t.RecipientBlockchainAddress, value32)
+			*t.SenderBlockchainAddress, *t.RecipientBlockchainAddress, valueUnits)
 		signature := transaction.GenerateSignature()
 		signatureStr := signature.String()
 		timestamp := transaction.Timestamp()
+		fee := transaction.Fee()
 
 		bt := &block.TransactionRequest{
 			SenderBlockchainAddress:    t.SenderBlockchainAddress,
 			RecipientBlockchainAddress: t.RecipientBlockchainAddress,
 			SenderPublicKey:            t.SenderPublicKey,
-			Value:                      &value32,
+			Value:                      &valueUnits,
+			Fee:                        &fee,
 			Timestamp:                  &timestamp,
 			Signature:                  &signatureStr,
 		}
@@ -267,10 +268,10 @@ func (ws *WalletServer) CreateHDTransaction(w http.ResponseWriter, req *http.Req
 	case http.MethodPost:
 		decoder := json.NewDecoder(req.Body)
 		var t struct {
-			Mnemonic                   string  `json:"mnemonic"`
-			Passphrase                 string  `json:"passphrase,omitempty"`
-			RecipientBlockchainAddress string  `json:"recipient_blockchain_address"`
-			Value                      float32 `json:"value"`
+			Mnemonic                   string `json:"mnemonic"`
+			Passphrase                 string `json:"passphrase,omitempty"`
+			RecipientBlockchainAddress string `json:"recipient_blockchain_address"`
+			Value                      string `json:"value"`
 		}
 
 		err := decoder.Decode(&t)
@@ -287,22 +288,31 @@ func (ws *WalletServer) CreateHDTransaction(w http.ResponseWriter, req *http.Req
 			return
 		}
 
+		valueUnits, err := utils.ParseFLATUN(t.Value)
+		if err != nil {
+			log.Printf("ERROR: tutar çözümlenemedi: %v", err)
+			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+
 		// HD cüzdan oluştur
 		hdWallet := wallet.NewHDWalletFromMnemonic(t.Mnemonic, t.Passphrase)
 
 		// İşlem oluştur
-		transaction := hdWallet.CreateTransaction(t.RecipientBlockchainAddress, t.Value)
+		transaction := hdWallet.CreateTransaction(t.RecipientBlockchainAddress, valueUnits)
 		signature := transaction.GenerateSignature()
 		signatureStr := signature.String()
 
 		// Blockchain sunucusuna gönder
 		pubKeyStr := hdWallet.PublicKeyStr()
 		timestamp := transaction.Timestamp()
+		fee := transaction.Fee()
 		bt := &block.TransactionRequest{
 			SenderBlockchainAddress:    &hdWallet.BlockchainAddress,
 			RecipientBlockchainAddress: &t.RecipientBlockchainAddress,
 			SenderPublicKey:            &pubKeyStr,
-			Value:                      &t.Value,
+			Value:                      &valueUnits,
+			Fee:                        &fee,
 			Timestamp:                  &timestamp,
 			Signature:                  &signatureStr,
 		}
@@ -361,11 +371,13 @@ func (ws *WalletServer) WalletAmount(w http.ResponseWriter, req *http.Request) {
 			}
 
 			m, _ := json.Marshal(struct {
-				Message string  `json:"message"`
-				Amount  float32 `json:"amount"`
+				Message     string `json:"message"`
+				Amount      string `json:"amount"`
+				AmountUnits int64  `json:"amount_units"`
 			}{
-				Message: "success",
-				Amount:  bar.Amount,
+				Message:     "success",
+				Amount:      bar.Amount,
+				AmountUnits: bar.AmountUnits,
 			})
 			io.WriteString(w, string(m[:]))
 		} else {

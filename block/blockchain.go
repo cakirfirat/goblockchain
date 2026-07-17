@@ -24,12 +24,21 @@ const (
 	// difficulty artışı node'u kilitleyip tüm HTTP isteklerini dondurur
 	MAX_MINING_DIFFICULTY = 5
 	MINING_SENDER         = "THE BLOCKCHAIN"
-	MINING_REWARD         = 1.0
-	MINING_TIMER_SEC      = 20
+	MINING_TIMER_SEC      = 60
+
+	// ---- Ekonomi (Temmuz 2026 kararları — LANSMAN SONRASI DEĞİŞTİRİLEMEZ) ----
+	// 1 FLATUN = 100.000.000 alt birim; tüm tutarlar int64 alt birimdir.
+	// Başlangıç ödülü 50 FLATUN/blok; her HALVING_INTERVAL blokta yarılanır
+	// (~4 yıl @ 60 sn) ve toplam arz ~210M FLATUN'da yataylanır. Yarılanma
+	// ödülü 1 FLATUN'un altına düşünce sonsuza dek 1 FLATUN/blok kuyruk
+	// emisyonu devreye girer — node çalıştırmak asla ödülsüz kalmaz.
+	INITIAL_BLOCK_REWARD int64 = 50 * utils.UNITS_PER_FLATUN
+	HALVING_INTERVAL           = 2_102_400
+	TAIL_REWARD          int64 = 1 * utils.UNITS_PER_FLATUN
 
 	// Dinamik zorluk ayarları — hedef süre mining timer ile tutarlı olmalı,
 	// yoksa zorluk her ayarlamada tırmanır
-	TARGET_BLOCK_TIME_SEC          = 20
+	TARGET_BLOCK_TIME_SEC          = 60
 	DIFFICULTY_ADJUSTMENT_INTERVAL = 10 // Her 10 blokta bir difficulty yeniden hesaplanır
 
 	// Otorite node her CHECKPOINT_INTERVAL blokta bir checkpoint imzalar
@@ -49,6 +58,24 @@ var httpClient = &http.Client{Timeout: 10 * time.Second}
 // Mining zamanlayıcısına eklenen rastgele gecikme için; node'lar kilitli adımda
 // kazarsa eşit uzunlukta fork'lar uzun süre yaşar
 var rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
+
+// BlockReward, verilen blok yüksekliğindeki coinbase ödülünü döndürür
+// (işlem ücretleri hariç). Konsensüs kuralıdır: her node aynı yüksekliğe
+// aynı ödülü hesaplar ve ValidChain bunu doğrular.
+func BlockReward(height int) int64 {
+	if height <= 0 {
+		return 0 // genesis bloğunda ödül yok
+	}
+	halvings := height / HALVING_INTERVAL
+	if halvings >= 63 {
+		return TAIL_REWARD
+	}
+	reward := INITIAL_BLOCK_REWARD >> uint(halvings)
+	if reward < TAIL_REWARD {
+		return TAIL_REWARD
+	}
+	return reward
+}
 
 type Block struct {
 	timestamp    int64
@@ -188,8 +215,13 @@ type Blockchain struct {
 	checkpointPublicKey  *ecdsa.PublicKey  // doluysa peer checkpoint'leri doğrulanır ve uygulanır
 }
 
-// blockchainFile, diske yazılan kalıcı durum
+// blockchainFile, diske yazılan kalıcı durum.
+// Version, ekonomi/format değişikliklerinde eski dosyaların sessizce yanlış
+// yorumlanmasını engeller (v2: int64 alt birim + imzalı işlem alanları).
+const chainFileVersion = 2
+
 type blockchainFile struct {
+	Version    int         `json:"version"`
 	Chain      []*Block    `json:"chain"`
 	Checkpoint *Checkpoint `json:"checkpoint,omitempty"`
 }
@@ -212,14 +244,19 @@ func NewBlockchainWithPersistence(blockchainAddress string, port uint16, dataFil
 		if data, err := os.ReadFile(dataFile); err == nil {
 			var f blockchainFile
 			if err := json.Unmarshal(data, &f); err == nil && len(f.Chain) > 0 {
-				bc.chain = f.Chain
-				bc.checkpoint = f.Checkpoint
-				bc.currentDifficulty = clampDifficulty(f.Chain[len(f.Chain)-1].Difficulty())
-				bc.rebuildSeenLocked()
-				log.Printf("Zincir diskten yüklendi: %d blok (%s)", len(f.Chain), dataFile)
-				return bc
+				if f.Version != chainFileVersion {
+					log.Printf("UYARI: zincir dosyası eski formatta (v%d, beklenen v%d) — yeni zincir başlatılıyor", f.Version, chainFileVersion)
+				} else {
+					bc.chain = f.Chain
+					bc.checkpoint = f.Checkpoint
+					bc.currentDifficulty = clampDifficulty(f.Chain[len(f.Chain)-1].Difficulty())
+					bc.rebuildSeenLocked()
+					log.Printf("Zincir diskten yüklendi: %d blok (%s)", len(f.Chain), dataFile)
+					return bc
+				}
+			} else if err != nil {
+				log.Printf("UYARI: zincir dosyası okunamadı, yeni zincir başlatılıyor: %v", err)
 			}
-			log.Printf("UYARI: zincir dosyası okunamadı, yeni zincir başlatılıyor: %v", err)
 		}
 	}
 
@@ -381,7 +418,7 @@ func (bc *Blockchain) saveLocked() {
 	if bc.dataFile == "" {
 		return
 	}
-	f := blockchainFile{Chain: bc.chain, Checkpoint: bc.checkpoint}
+	f := blockchainFile{Version: chainFileVersion, Chain: bc.chain, Checkpoint: bc.checkpoint}
 	data, err := json.Marshal(&f)
 	if err != nil {
 		log.Printf("HATA: zincir serileştirilemedi: %v", err)
@@ -435,9 +472,9 @@ func (bc *Blockchain) Print() {
 	fmt.Printf("%s\n", strings.Repeat("*", 25))
 }
 
-func (bc *Blockchain) CreateTransaction(sender string, recipient string, value float32,
+func (bc *Blockchain) CreateTransaction(sender string, recipient string, value int64, fee int64,
 	timestamp int64, senderPublicKey *ecdsa.PublicKey, s *utils.Signature) bool {
-	isTransacted := bc.AddTransaction(sender, recipient, value, timestamp, senderPublicKey, s)
+	isTransacted := bc.AddTransaction(sender, recipient, value, fee, timestamp, senderPublicKey, s)
 
 	if isTransacted {
 		publicKeyStr := fmt.Sprintf("%064x%064x", senderPublicKey.X.Bytes(),
@@ -448,6 +485,7 @@ func (bc *Blockchain) CreateTransaction(sender string, recipient string, value f
 			RecipientBlockchainAddress: &recipient,
 			SenderPublicKey:            &publicKeyStr,
 			Value:                      &value,
+			Fee:                        &fee,
 			Timestamp:                  &timestamp,
 			Signature:                  &signatureStr,
 		}
@@ -471,14 +509,14 @@ func (bc *Blockchain) CreateTransaction(sender string, recipient string, value f
 	return isTransacted
 }
 
-func (bc *Blockchain) AddTransaction(sender string, recipient string, value float32,
+func (bc *Blockchain) AddTransaction(sender string, recipient string, value int64, fee int64,
 	timestamp int64, senderPublicKey *ecdsa.PublicKey, s *utils.Signature) bool {
 	bc.mux.Lock()
 	defer bc.mux.Unlock()
-	return bc.addTransactionLocked(sender, recipient, value, timestamp, senderPublicKey, s)
+	return bc.addTransactionLocked(sender, recipient, value, fee, timestamp, senderPublicKey, s)
 }
 
-func (bc *Blockchain) addTransactionLocked(sender string, recipient string, value float32,
+func (bc *Blockchain) addTransactionLocked(sender string, recipient string, value int64, fee int64,
 	timestamp int64, senderPublicKey *ecdsa.PublicKey, s *utils.Signature) bool {
 
 	if sender == MINING_SENDER {
@@ -488,8 +526,8 @@ func (bc *Blockchain) addTransactionLocked(sender string, recipient string, valu
 		return true
 	}
 
-	// Değer negatif/sıfır/NaN olamaz; negatif değer para basmaya denk gelir
-	if !(value > 0) {
+	// Tutar pozitif, ücret negatif olmayan olmalı; negatif değer para basmaya denk gelir
+	if value <= 0 || fee < 0 {
 		log.Println("ERROR: Gecersiz islem tutari")
 		return false
 	}
@@ -497,8 +535,21 @@ func (bc *Blockchain) addTransactionLocked(sender string, recipient string, valu
 		log.Println("ERROR: Islemde zaman damgasi eksik")
 		return false
 	}
+	if senderPublicKey == nil || s == nil || s.R == nil || s.S == nil {
+		log.Println("ERROR: Imza veya acik anahtar eksik")
+		return false
+	}
 
-	t := NewTransactionWithTimestamp(sender, recipient, value, timestamp)
+	// Adres bağlama: gönderici adresi, verilen açık anahtardan türetilen
+	// adresle eşleşmek ZORUNDA — yoksa geçerli bir imzayla başkasının
+	// adresinden harcama yapılabilir
+	if utils.AddressFromPublicKey(senderPublicKey) != sender {
+		log.Println("ERROR: Acik anahtar gonderici adresiyle eslesmiyor")
+		return false
+	}
+
+	publicKeyStr := fmt.Sprintf("%064x%064x", senderPublicKey.X.Bytes(), senderPublicKey.Y.Bytes())
+	t := NewSignedTransaction(sender, recipient, value, fee, timestamp, publicKeyStr, s.String())
 
 	// Replay koruması: aynı imzalı işlem (aynı hash) yalnızca bir kez kabul edilir
 	hashStr := t.HashStr()
@@ -515,7 +566,7 @@ func (bc *Blockchain) addTransactionLocked(sender string, recipient string, valu
 	// Bakiye kontrolü havuzda bekleyen harcamaları da hesaba katar,
 	// yoksa aynı bakiye havuz içinde iki kez harcanabilir
 	available := bc.calculateTotalAmountLocked(sender) - bc.pendingSpendLocked(sender)
-	if available < value {
+	if available < value+fee {
 		log.Println("ERROR: Not enough balance in a wallet")
 		return false
 	}
@@ -525,35 +576,33 @@ func (bc *Blockchain) addTransactionLocked(sender string, recipient string, valu
 	return true
 }
 
-// pendingSpendLocked, göndericinin havuzda bekleyen toplam harcamasını döndürür
-func (bc *Blockchain) pendingSpendLocked(sender string) float32 {
-	var total float32
+// pendingSpendLocked, göndericinin havuzda bekleyen toplam harcamasını döndürür (tutar + ücret)
+func (bc *Blockchain) pendingSpendLocked(sender string) int64 {
+	var total int64
 	for _, t := range bc.transactionPool {
 		if t.senderBlockchainAddress == sender {
-			total += t.value
+			total += t.value + t.fee
 		}
 	}
 	return total
 }
 
+// VerifyTransactionSignature, imzayı SigningPayload üzerinden doğrular
+// (imza/pubkey alanları yükün dışındadır)
 func (bc *Blockchain) VerifyTransactionSignature(
 	senderPublicKey *ecdsa.PublicKey, s *utils.Signature, t *Transaction) bool {
 	if senderPublicKey == nil || s == nil || s.R == nil || s.S == nil {
 		return false
 	}
-	m, _ := json.Marshal(t)
-	h := sha256.Sum256([]byte(m))
+	h := sha256.Sum256(t.SigningPayload())
 	return ecdsa.Verify(senderPublicKey, h[:], s.R, s.S)
 }
 
 func (bc *Blockchain) CopyTransactionPool() []*Transaction {
 	transactions := make([]*Transaction, 0)
 	for _, t := range bc.transactionPool {
-		transactions = append(transactions,
-			NewTransactionWithTimestamp(t.senderBlockchainAddress,
-				t.recipientBlockchainAddress,
-				t.value,
-				t.timestamp))
+		copied := *t
+		transactions = append(transactions, &copied)
 	}
 	return transactions
 }
@@ -589,7 +638,13 @@ func (bc *Blockchain) ValidProof(nonce int, previousHash [32]byte, transactions 
 func (bc *Blockchain) Mining() bool {
 	bc.mux.Lock()
 
-	bc.addTransactionLocked(MINING_SENDER, bc.blockchainAddress, MINING_REWARD, 0, nil, nil)
+	// Coinbase: bir sonraki bloğun yüksekliğine göre takvim ödülü + havuzdaki ücretler
+	var fees int64
+	for _, t := range bc.transactionPool {
+		fees += t.fee
+	}
+	reward := BlockReward(len(bc.chain)) + fees
+	bc.addTransactionLocked(MINING_SENDER, bc.blockchainAddress, reward, 0, 0, nil, nil)
 	nonce := bc.proofOfWorkLocked()
 	previousHash := bc.LastBlock().Hash()
 	bc.createBlockLocked(nonce, previousHash)
@@ -623,36 +678,46 @@ func (bc *Blockchain) StartMining() {
 	_ = time.AfterFunc(time.Second*MINING_TIMER_SEC+jitter, bc.StartMining)
 }
 
-func (bc *Blockchain) CalculateTotalAmount(blockchainAddress string) float32 {
+func (bc *Blockchain) CalculateTotalAmount(blockchainAddress string) int64 {
 	bc.mux.Lock()
 	defer bc.mux.Unlock()
 	return bc.calculateTotalAmountLocked(blockchainAddress)
 }
 
-func (bc *Blockchain) calculateTotalAmountLocked(blockchainAddress string) float32 {
-	var totalAmount float32 = 0.0
+func (bc *Blockchain) calculateTotalAmountLocked(blockchainAddress string) int64 {
+	var totalAmount int64
 	for _, b := range bc.chain {
 		for _, t := range b.transactions {
-			value := t.value
 			if blockchainAddress == t.recipientBlockchainAddress {
-				totalAmount += value
+				totalAmount += t.value
 			}
-
 			if blockchainAddress == t.senderBlockchainAddress {
-				totalAmount -= value
+				totalAmount -= t.value + t.fee
 			}
 		}
 	}
 	return totalAmount
 }
 
+// ValidChain, aday zincirin TAMAMINI bağımsız doğrular:
+// blok bağlantıları + PoW, coinbase kuralı (blok başına tek ödül işlemi,
+// takvime + ücretlere uyan miktar), her kullanıcı işleminin imzası ve
+// pubkey↔adres bağı, ve bakiye tekrarı (hiçbir adres eksiye düşemez —
+// fork'ta para icat edilemez).
 func (bc *Blockchain) ValidChain(chain []*Block) bool {
 	if len(chain) == 0 {
 		return false
 	}
+
+	balances := make(map[string]int64)
+
+	// Genesis (indeks 0) işlem içermez; içeriyorsa reddet
+	if len(chain[0].transactions) != 0 {
+		return false
+	}
+
 	preBlock := chain[0]
-	currentIndex := 1
-	for currentIndex < len(chain) {
+	for currentIndex := 1; currentIndex < len(chain); currentIndex++ {
 		b := chain[currentIndex]
 		if b.previousHash != preBlock.Hash() {
 			return false
@@ -663,8 +728,54 @@ func (bc *Blockchain) ValidChain(chain []*Block) bool {
 			return false
 		}
 
+		// Coinbase ve işlem doğrulaması
+		var coinbaseCount int
+		var coinbaseValue int64
+		var fees int64
+		for _, t := range b.transactions {
+			if t.senderBlockchainAddress == MINING_SENDER {
+				coinbaseCount++
+				coinbaseValue = t.value
+				if t.senderPublicKey != "" || t.signature != "" || t.fee != 0 {
+					return false
+				}
+				continue
+			}
+
+			if t.value <= 0 || t.fee < 0 || t.timestamp <= 0 {
+				return false
+			}
+			if len(t.senderPublicKey) != 128 || len(t.signature) != 128 {
+				return false
+			}
+			pub := utils.PublicKeyFromString(t.senderPublicKey)
+			if utils.AddressFromPublicKey(pub) != t.senderBlockchainAddress {
+				return false
+			}
+			sig := utils.SignatureFromString(t.signature)
+			h := sha256.Sum256(t.SigningPayload())
+			if !ecdsa.Verify(pub, h[:], sig.R, sig.S) {
+				return false
+			}
+			fees += t.fee
+		}
+		if coinbaseCount != 1 || coinbaseValue != BlockReward(currentIndex)+fees {
+			return false
+		}
+
+		// Bakiye tekrarı: gönderici tutar+ücret öder, alıcı tutarı alır,
+		// madenci coinbase ile ödül+ücretleri alır
+		for _, t := range b.transactions {
+			if t.senderBlockchainAddress != MINING_SENDER {
+				balances[t.senderBlockchainAddress] -= t.value + t.fee
+				if balances[t.senderBlockchainAddress] < 0 {
+					return false
+				}
+			}
+			balances[t.recipientBlockchainAddress] += t.value
+		}
+
 		preBlock = b
-		currentIndex += 1
 	}
 	return true
 }
@@ -855,7 +966,7 @@ func (bc *Blockchain) ResolveConflicts() bool {
 // filterPoolByBalanceLocked, zincir değişiminden sonra havuzda artık
 // karşılığı olmayan işlemleri (yetersiz bakiye) sırayla eler
 func (bc *Blockchain) filterPoolByBalanceLocked() {
-	pending := make(map[string]float32)
+	pending := make(map[string]int64)
 	kept := make([]*Transaction, 0, len(bc.transactionPool))
 	for _, t := range bc.transactionPool {
 		if t.senderBlockchainAddress == MINING_SENDER {
@@ -863,34 +974,78 @@ func (bc *Blockchain) filterPoolByBalanceLocked() {
 			continue
 		}
 		available := bc.calculateTotalAmountLocked(t.senderBlockchainAddress) - pending[t.senderBlockchainAddress]
-		if available < t.value {
-			log.Printf("Havuzdan elendi (yetersiz bakiye): %s -> %s (%.2f)",
-				t.senderBlockchainAddress, t.recipientBlockchainAddress, t.value)
+		if available < t.value+t.fee {
+			log.Printf("Havuzdan elendi (yetersiz bakiye): %s -> %s (%s FLATUN)",
+				t.senderBlockchainAddress, t.recipientBlockchainAddress, utils.FormatFLATUN(t.value))
 			continue
 		}
-		pending[t.senderBlockchainAddress] += t.value
+		pending[t.senderBlockchainAddress] += t.value + t.fee
 		kept = append(kept, t)
 	}
 	bc.transactionPool = kept
 }
 
+// Transaction: tutarlar int64 alt birimdir (1 FLATUN = 1e8). İmza ve açık
+// anahtar zincirde işlemle birlikte saklanır; böylece herhangi bir node
+// zincirin TAMAMINI bağımsız doğrulayabilir. Coinbase (ödül) işlemlerinde
+// pubkey/imza boştur.
 type Transaction struct {
 	senderBlockchainAddress    string
 	recipientBlockchainAddress string
-	value                      float32
+	value                      int64
+	fee                        int64
 	timestamp                  int64
+	senderPublicKey            string // hex (coinbase'de boş)
+	signature                  string // hex (coinbase'de boş)
 }
 
-func NewTransaction(sender string, recipient string, value float32) *Transaction {
-	return &Transaction{sender, recipient, value, time.Now().UnixNano()}
+func NewTransaction(sender string, recipient string, value int64) *Transaction {
+	return &Transaction{
+		senderBlockchainAddress:    sender,
+		recipientBlockchainAddress: recipient,
+		value:                      value,
+		timestamp:                  time.Now().UnixNano(),
+	}
 }
 
-func NewTransactionWithTimestamp(sender string, recipient string, value float32, timestamp int64) *Transaction {
-	return &Transaction{sender, recipient, value, timestamp}
+func NewSignedTransaction(sender, recipient string, value, fee, timestamp int64,
+	senderPublicKey, signature string) *Transaction {
+	return &Transaction{
+		senderBlockchainAddress:    sender,
+		recipientBlockchainAddress: recipient,
+		value:                      value,
+		fee:                        fee,
+		timestamp:                  timestamp,
+		senderPublicKey:            senderPublicKey,
+		signature:                  signature,
+	}
 }
 
-func (t *Transaction) Timestamp() int64 {
-	return t.timestamp
+func (t *Transaction) Timestamp() int64 { return t.timestamp }
+func (t *Transaction) Value() int64     { return t.value }
+func (t *Transaction) Fee() int64       { return t.fee }
+
+// SigningPayload, imzalanan baytları üretir. Cüzdan tarafı (wallet paketi)
+// birebir aynı JSON'u üretmek ZORUNDADIR — alan sırası dahil. İmza ve açık
+// anahtar bu yüke dahil DEĞİLDİR (imza kendini imzalayamaz); ağ kimliği
+// dahildir (zincirler arası replay engeli).
+func (t *Transaction) SigningPayload() []byte {
+	m, _ := json.Marshal(struct {
+		Network   string `json:"network"`
+		Sender    string `json:"sender_blockchain_address"`
+		Recipient string `json:"recipient_blockchain_address"`
+		Value     int64  `json:"value"`
+		Fee       int64  `json:"fee"`
+		Timestamp int64  `json:"timestamp"`
+	}{
+		Network:   utils.NetworkID,
+		Sender:    t.senderBlockchainAddress,
+		Recipient: t.recipientBlockchainAddress,
+		Value:     t.value,
+		Fee:       t.fee,
+		Timestamp: t.timestamp,
+	})
+	return m
 }
 
 // Hash, işlemin benzersiz kimliği (replay koruması için)
@@ -907,34 +1062,46 @@ func (t *Transaction) Print() {
 	fmt.Printf("%s\n", strings.Repeat("-", 40))
 	fmt.Printf(" sender_blockchain_address      %s\n", t.senderBlockchainAddress)
 	fmt.Printf(" recipient_blockchain_address   %s\n", t.recipientBlockchainAddress)
-	fmt.Printf(" value                          %.1f\n", t.value)
+	fmt.Printf(" value                          %s FLATUN\n", utils.FormatFLATUN(t.value))
 }
 
 func (t *Transaction) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Sender    string  `json:"sender_blockchain_address"`
-		Recipient string  `json:"recipient_blockchain_address"`
-		Value     float32 `json:"value"`
-		Timestamp int64   `json:"timestamp"`
+		Sender    string `json:"sender_blockchain_address"`
+		Recipient string `json:"recipient_blockchain_address"`
+		Value     int64  `json:"value"`
+		Fee       int64  `json:"fee"`
+		Timestamp int64  `json:"timestamp"`
+		PublicKey string `json:"sender_public_key,omitempty"`
+		Signature string `json:"signature,omitempty"`
 	}{
 		Sender:    t.senderBlockchainAddress,
 		Recipient: t.recipientBlockchainAddress,
 		Value:     t.value,
+		Fee:       t.fee,
 		Timestamp: t.timestamp,
+		PublicKey: t.senderPublicKey,
+		Signature: t.signature,
 	})
 }
 
 func (t *Transaction) UnmarshalJSON(data []byte) error {
 	v := &struct {
-		Sender    *string  `json:"sender_blockchain_address"`
-		Recipient *string  `json:"recipient_blockchain_address"`
-		Value     *float32 `json:"value"`
-		Timestamp *int64   `json:"timestamp"`
+		Sender    *string `json:"sender_blockchain_address"`
+		Recipient *string `json:"recipient_blockchain_address"`
+		Value     *int64  `json:"value"`
+		Fee       *int64  `json:"fee"`
+		Timestamp *int64  `json:"timestamp"`
+		PublicKey *string `json:"sender_public_key"`
+		Signature *string `json:"signature"`
 	}{
 		Sender:    &t.senderBlockchainAddress,
 		Recipient: &t.recipientBlockchainAddress,
 		Value:     &t.value,
+		Fee:       &t.fee,
 		Timestamp: &t.timestamp,
+		PublicKey: &t.senderPublicKey,
+		Signature: &t.signature,
 	}
 	if err := json.Unmarshal(data, &v); err != nil {
 		return err
@@ -943,12 +1110,13 @@ func (t *Transaction) UnmarshalJSON(data []byte) error {
 }
 
 type TransactionRequest struct {
-	SenderBlockchainAddress    *string  `json:"sender_blockchain_address"`
-	RecipientBlockchainAddress *string  `json:"recipient_blockchain_address"`
-	SenderPublicKey            *string  `json:"sender_public_key"`
-	Value                      *float32 `json:"value"`
-	Timestamp                  *int64   `json:"timestamp"`
-	Signature                  *string  `json:"signature"`
+	SenderBlockchainAddress    *string `json:"sender_blockchain_address"`
+	RecipientBlockchainAddress *string `json:"recipient_blockchain_address"`
+	SenderPublicKey            *string `json:"sender_public_key"`
+	Value                      *int64  `json:"value"`
+	Fee                        *int64  `json:"fee"`
+	Timestamp                  *int64  `json:"timestamp"`
+	Signature                  *string `json:"signature"`
 }
 
 func (tr *TransactionRequest) Validate() bool {
@@ -963,16 +1131,22 @@ func (tr *TransactionRequest) Validate() bool {
 	return true
 }
 
-type AmountResponse struct {
-	Amount float32 `json:"amount"`
+// FeeOrZero, ücret alanı gönderilmemişse 0 kabul eder
+func (tr *TransactionRequest) FeeOrZero() int64 {
+	if tr.Fee == nil {
+		return 0
+	}
+	return *tr.Fee
 }
 
-func (ar *AmountResponse) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
-		Amount float32 `json:"amount"`
-	}{
-		Amount: ar.Amount,
-	})
+// AmountResponse: amount_units ham alt birim (makine), amount FLATUN metni (insan)
+type AmountResponse struct {
+	AmountUnits int64  `json:"amount_units"`
+	Amount      string `json:"amount"`
+}
+
+func NewAmountResponse(units int64) *AmountResponse {
+	return &AmountResponse{AmountUnits: units, Amount: utils.FormatFLATUN(units)}
 }
 
 // adjustDifficultyLocked, dinamik difficulty hesaplar (1..MAX_MINING_DIFFICULTY aralığında)
