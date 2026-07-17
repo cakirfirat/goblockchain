@@ -316,6 +316,48 @@ func (bcs *BlockchainServer) StartMine(w http.ResponseWriter, req *http.Request)
 	}
 }
 
+func (bcs *BlockchainServer) StopMine(w http.ResponseWriter, req *http.Request) {
+	setCORSHeaders(w)
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	switch req.Method {
+	case http.MethodGet:
+		bcs.GetBlockchain().StopMining()
+		w.Header().Add("Content-Type", "application/json")
+		io.WriteString(w, string(utils.JsonStatus("success")))
+	default:
+		log.Println("ERROR: Invalid HTTP Method")
+		w.WriteHeader(http.StatusBadRequest)
+	}
+}
+
+func (bcs *BlockchainServer) MineStatus(w http.ResponseWriter, req *http.Request) {
+	setCORSHeaders(w)
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	switch req.Method {
+	case http.MethodGet:
+		bc := bcs.GetBlockchain()
+		w.Header().Add("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(struct {
+			Mining bool `json:"mining"`
+			Height int  `json:"height"`
+		}{
+			Mining: bc.IsMining(),
+			Height: len(bc.GetBlocks()) - 1,
+		})
+	default:
+		log.Println("ERROR: Invalid HTTP Method")
+		w.WriteHeader(http.StatusBadRequest)
+	}
+}
+
 func (bcs *BlockchainServer) Amount(w http.ResponseWriter, req *http.Request) {
 	// CORS başlıklarını ekle
 	setCORSHeaders(w)
@@ -566,6 +608,8 @@ func (bcs *BlockchainServer) Run() {
 	mux.HandleFunc("/transactions", bcs.Transactions)
 	mux.HandleFunc("/mine", bcs.Mine)
 	mux.HandleFunc("/mine/start", bcs.StartMine)
+	mux.HandleFunc("/mine/stop", bcs.StopMine)
+	mux.HandleFunc("/mine/status", bcs.MineStatus)
 	mux.HandleFunc("/amount", bcs.Amount)
 	mux.HandleFunc("/consensus", bcs.Consensus)
 
