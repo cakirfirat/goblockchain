@@ -654,19 +654,30 @@ func (bc *Blockchain) Mining() bool {
 
 	log.Println("action=mining, status=success")
 
-	// Ağ çağrıları kilit dışında: peer'lara yeni zinciri almalarını söyle
+	// Ağ çağrıları kilit dışında. Yeni zincir peer'lara İTİLİR (POST /submit):
+	// NAT arkasındaki bir madenciden ağ zinciri ÇEKEMEZ, bu yüzden itme
+	// olmadan ev kullanıcısının kazdığı blok ağa asla ulaşamaz.
+	chainJSON := bc.ChainJSON()
 	for _, n := range bc.Peers() {
-		endpoint := fmt.Sprintf("http://%s/consensus", n)
-		req, err := http.NewRequest(http.MethodPut, endpoint, nil)
+		resp, err := httpClient.Post(
+			fmt.Sprintf("http://%s/submit", n),
+			"application/json",
+			bytes.NewBuffer(chainJSON),
+		)
 		if err != nil {
-			continue
-		}
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			log.Printf("UYARI: konsensus bildirimi %s adresine ulaşmadı: %v", n, err)
+			log.Printf("UYARI: zincir %s adresine itilemedi: %v", n, err)
 			continue
 		}
 		resp.Body.Close()
+
+		// Erişilebilir peer'lar için ek tetik: kendi ağından da çeksin
+		req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://%s/consensus", n), nil)
+		if err != nil {
+			continue
+		}
+		if resp, err := httpClient.Do(req); err == nil {
+			resp.Body.Close()
+		}
 	}
 
 	return true
@@ -900,17 +911,72 @@ func betterChain(candidateWork *big.Int, candidateTip string, currentWork *big.I
 	}
 }
 
-func (bc *Blockchain) ResolveConflicts() bool {
-	peers := bc.Peers()
+// ConsiderChain, aday zinciri değerlendirir: geçerliyse, mevcut zincirden daha
+// fazla iş içeriyorsa (eşitlikte deterministik tie-break) ve checkpoint ile
+// çelişmiyorsa benimser. Hem çekme yolu (ResolveConflicts) hem itme yolu
+// (POST /submit — NAT arkasındaki madencinin bloğunu ağa ulaştırma kanalı)
+// bu tek kapıdan geçer.
+func (bc *Blockchain) ConsiderChain(chain []*Block) bool {
+	if len(chain) == 0 || !bc.ValidChain(chain) {
+		return false
+	}
+	candWork := chainWork(chain)
+	candTip := chain[len(chain)-1].HashStr()
 
 	bc.mux.Lock()
-	bestWork := chainWork(bc.chain)
-	bestTip := bc.LastBlock().HashStr()
-	bc.mux.Unlock()
+	defer bc.mux.Unlock()
 
-	var bestChain []*Block = nil
+	myWork := chainWork(bc.chain)
+	myTip := bc.LastBlock().HashStr()
+	if !betterChain(candWork, candTip, myWork, myTip) {
+		return false
+	}
+	if !bc.chainSatisfiesCheckpointLocked(chain) {
+		log.Printf("Aday zincir checkpoint ile çelişiyor, reddedildi (uzunluk %d)", len(chain))
+		return false
+	}
 
-	for _, n := range peers {
+	oldChain := bc.chain
+	bc.chain = chain
+	bc.currentDifficulty = clampDifficulty(chain[len(chain)-1].Difficulty())
+
+	chainTxs := make(map[string]bool)
+	for _, b := range bc.chain {
+		for _, t := range b.transactions {
+			chainTxs[t.HashStr()] = true
+		}
+	}
+
+	// Reorg kurtarması: terk edilen fork'ta olup yeni zincirde olmayan
+	// kullanıcı işlemlerini havuza geri ekle — yoksa fork yarışını
+	// kaybeden bloklardaki transferler sessizce yok olur
+	recovered := 0
+	for _, b := range oldChain {
+		for _, t := range b.transactions {
+			if t.senderBlockchainAddress == MINING_SENDER {
+				continue
+			}
+			if !chainTxs[t.HashStr()] {
+				bc.transactionPool = append(bc.transactionPool, t)
+				recovered++
+			}
+		}
+	}
+	if recovered > 0 {
+		log.Printf("Reorg: terk edilen fork'tan %d işlem havuza geri alındı", recovered)
+	}
+
+	bc.prunePoolLocked(chainTxs)
+	bc.filterPoolByBalanceLocked()
+	bc.rebuildSeenLocked()
+	bc.saveLocked()
+	log.Printf("Zincir değiştirildi (%d blok)", len(bc.chain))
+	return true
+}
+
+func (bc *Blockchain) ResolveConflicts() bool {
+	replaced := false
+	for _, n := range bc.Peers() {
 		bc.fetchPeerCheckpoint(n)
 
 		endpoint := fmt.Sprintf("http://%s/chain", n)
@@ -927,78 +993,16 @@ func (bc *Blockchain) ResolveConflicts() bool {
 				resp.Body.Close()
 				continue
 			}
-
-			chain := bcResp.Chain()
-			if len(chain) == 0 || !bc.ValidChain(chain) {
-				resp.Body.Close()
-				continue
-			}
-
-			w := chainWork(chain)
-			tip := chain[len(chain)-1].HashStr()
-			if betterChain(w, tip, bestWork, bestTip) {
-				bestWork = w
-				bestTip = tip
-				bestChain = chain
+			if bc.ConsiderChain(bcResp.Chain()) {
+				replaced = true
 			}
 		}
 		resp.Body.Close()
 	}
-
-	if bestChain != nil {
-		bc.mux.Lock()
-		defer bc.mux.Unlock()
-
-		// Kilit alınana kadar kendi zincirimiz değişmiş olabilir; kuralı yeniden uygula
-		myWork := chainWork(bc.chain)
-		myTip := bc.LastBlock().HashStr()
-		if !betterChain(bestWork, bestTip, myWork, myTip) {
-			return false
-		}
-		if !bc.chainSatisfiesCheckpointLocked(bestChain) {
-			log.Printf("Aday zincir checkpoint ile çelişiyor, reddedildi (uzunluk %d)", len(bestChain))
-			return false
-		}
-
-		oldChain := bc.chain
-		bc.chain = bestChain
-		bc.currentDifficulty = clampDifficulty(bestChain[len(bestChain)-1].Difficulty())
-
-		chainTxs := make(map[string]bool)
-		for _, b := range bc.chain {
-			for _, t := range b.transactions {
-				chainTxs[t.HashStr()] = true
-			}
-		}
-
-		// Reorg kurtarması: terk edilen fork'ta olup yeni zincirde olmayan
-		// kullanıcı işlemlerini havuza geri ekle — yoksa fork yarışını
-		// kaybeden bloklardaki transferler sessizce yok olur
-		recovered := 0
-		for _, b := range oldChain {
-			for _, t := range b.transactions {
-				if t.senderBlockchainAddress == MINING_SENDER {
-					continue
-				}
-				if !chainTxs[t.HashStr()] {
-					bc.transactionPool = append(bc.transactionPool, t)
-					recovered++
-				}
-			}
-		}
-		if recovered > 0 {
-			log.Printf("Reorg: terk edilen fork'tan %d işlem havuza geri alındı", recovered)
-		}
-
-		bc.prunePoolLocked(chainTxs)
-		bc.filterPoolByBalanceLocked()
-		bc.rebuildSeenLocked()
-		bc.saveLocked()
-		log.Printf("Resolve conflicts: zincir değiştirildi (%d blok)", len(bc.chain))
-		return true
+	if !replaced {
+		log.Printf("Resolve conflicts: zincir korundu")
 	}
-	log.Printf("Resolve conflicts: zincir korundu")
-	return false
+	return replaced
 }
 
 // filterPoolByBalanceLocked, zincir değişiminden sonra havuzda artık

@@ -34,6 +34,10 @@ var (
 	dataDir        = flag.String("data-dir", "data", "Zincir ve cüzdan dosyalarının yazılacağı dizin")
 	walletBind     = flag.String("bind", "127.0.0.1", "Cüzdan sunucusunun bağlanacağı adres (cüzdan API'sini dışarı AÇMAYIN)")
 	nodeBind       = flag.String("node-bind", "0.0.0.0", "Blockchain API'sinin bağlanacağı adres")
+
+	bootstrapURL     = flag.String("bootstrap", utils.DefaultBootstrapURL, "Bootstrap sunucusu URL'i")
+	useDNS           = flag.Bool("dns", true, "DNS seed keşfini etkinleştir")
+	checkpointPubKey = flag.String("checkpoint-pubkey", utils.DefaultCheckpointPubKeyHex, "Checkpoint otorite AÇIK anahtarı (hex)")
 )
 
 // BlockchainServer yapısı
@@ -51,6 +55,7 @@ type StandaloneServer struct {
 	walletServer      *WalletServer
 	blockchainServer  *BlockchainServer
 	blockchain        *block.Blockchain
+	p2p               *utils.P2PNetwork
 	walletPort        uint16
 	blockchainPort    uint16
 	blockchainAddress string
@@ -99,12 +104,22 @@ func NewStandaloneServer(walletPort, blockchainPort uint16, miner bool) *Standal
 	// Cüzdan oluştur/yükle (uygulamanın mining yapmak için kullanacağı cüzdan)
 	hdWallet := loadOrCreateHDWallet(*dataDir)
 
-	// Blockchain sunucusunu oluştur
-	blockchainServer := NewBlockchainServer(blockchainPort, *blockchainPeer)
+	// P2P katmanı: bootstrap + DNS seed keşfi ile gerçek ağa katıl
+	blockchainServer := NewBlockchainServer(blockchainPort, *bootstrapURL)
+	blockchainServer.p2p.SetUseDNS(*useDNS)
+	if *blockchainPeer != "" {
+		blockchainServer.p2p.AddNode(*blockchainPeer)
+	}
 
 	// Blockchain nesnesini oluştur (kalıcı: her blok diske yazılır)
 	chainFile := filepath.Join(*dataDir, fmt.Sprintf("blockchain_%d.json", blockchainPort))
 	blockchain := block.NewBlockchainWithPersistence(hdWallet.BlockchainAddress, blockchainPort, chainFile)
+
+	// Peer'lar konsensüse katılır; checkpoint imzası zincirin kimliğini doğrular
+	blockchain.SetPeerProvider(blockchainServer.p2p)
+	if *checkpointPubKey != "" {
+		blockchain.SetCheckpointKeys(nil, utils.PublicKeyFromString(*checkpointPubKey))
+	}
 
 	// Cüzdan sunucusu oluştur ve yerel cüzdanı bağla (sidecar endpoint'leri için)
 	walletServer := NewWalletServer(walletPort, blockchainAddr)
@@ -114,6 +129,7 @@ func NewStandaloneServer(walletPort, blockchainPort uint16, miner bool) *Standal
 		walletServer:      walletServer,
 		blockchainServer:  blockchainServer,
 		blockchain:        blockchain,
+		p2p:               blockchainServer.p2p,
 		walletPort:        walletPort,
 		blockchainPort:    blockchainPort,
 		blockchainAddress: hdWallet.BlockchainAddress,
@@ -188,6 +204,27 @@ func (s *StandaloneServer) Run() {
 				}
 				w.WriteHeader(http.StatusCreated)
 				io.WriteString(w, string(utils.JsonStatus("success")))
+			case http.MethodPut:
+				// Peer'dan iletilen (relay) imzalı işlem
+				decoder := json.NewDecoder(req.Body)
+				var t block.TransactionRequest
+				if err := decoder.Decode(&t); err != nil || !t.Validate() {
+					w.WriteHeader(http.StatusBadRequest)
+					io.WriteString(w, string(utils.JsonStatus("fail")))
+					return
+				}
+				publicKey := utils.PublicKeyFromString(*t.SenderPublicKey)
+				signature := utils.SignatureFromString(*t.Signature)
+				isAdded := s.blockchain.AddTransaction(*t.SenderBlockchainAddress,
+					*t.RecipientBlockchainAddress, *t.Value, t.FeeOrZero(), *t.Timestamp, publicKey, signature)
+
+				w.Header().Set("Content-Type", "application/json")
+				if !isAdded {
+					w.WriteHeader(http.StatusBadRequest)
+					io.WriteString(w, string(utils.JsonStatus("fail")))
+					return
+				}
+				io.WriteString(w, string(utils.JsonStatus("success")))
 			default:
 				w.Header().Set("Content-Type", "application/json")
 				transactions := s.blockchain.TransactionPool()
@@ -209,6 +246,72 @@ func (s *StandaloneServer) Run() {
 			m, _ := json.Marshal(ar)
 			w.Header().Set("Content-Type", "application/json")
 			io.WriteString(w, string(m[:]))
+		})
+
+		// ---- P2P endpoint'leri: tam ağ üyeliği ----
+		mux.HandleFunc("/consensus", func(w http.ResponseWriter, req *http.Request) {
+			if req.Method != http.MethodPut {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if s.blockchain.ResolveConflicts() {
+				io.WriteString(w, string(utils.JsonStatus("success")))
+			} else {
+				io.WriteString(w, string(utils.JsonStatus("fail")))
+			}
+		})
+
+		mux.HandleFunc("/checkpoint", func(w http.ResponseWriter, req *http.Request) {
+			cp := s.blockchain.Checkpoint()
+			if cp == nil {
+				w.WriteHeader(http.StatusNotFound)
+				io.WriteString(w, string(utils.JsonStatus("no checkpoint")))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(cp)
+		})
+
+		mux.HandleFunc("/submit", func(w http.ResponseWriter, req *http.Request) {
+			if req.Method != http.MethodPost {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			var bcResp block.Blockchain
+			if err := json.NewDecoder(req.Body).Decode(&bcResp); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				io.WriteString(w, string(utils.JsonStatus("fail")))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if s.blockchain.ConsiderChain(bcResp.Chain()) {
+				io.WriteString(w, string(utils.JsonStatus("success")))
+			} else {
+				io.WriteString(w, string(utils.JsonStatus("not adopted")))
+			}
+		})
+
+		mux.HandleFunc("/peers", func(w http.ResponseWriter, req *http.Request) {
+			switch req.Method {
+			case http.MethodGet:
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(s.p2p.GetActiveNodes())
+			case http.MethodPost:
+				var pr struct {
+					Address string `json:"address"`
+				}
+				if err := json.NewDecoder(req.Body).Decode(&pr); err != nil || pr.Address == "" {
+					w.WriteHeader(http.StatusBadRequest)
+					io.WriteString(w, string(utils.JsonStatus("fail")))
+					return
+				}
+				s.p2p.AddNode(pr.Address)
+				w.WriteHeader(http.StatusCreated)
+				io.WriteString(w, string(utils.JsonStatus("success")))
+			default:
+				w.WriteHeader(http.StatusBadRequest)
+			}
 		})
 
 		mux.HandleFunc("/mine", func(w http.ResponseWriter, req *http.Request) {
@@ -264,6 +367,20 @@ func (s *StandaloneServer) Run() {
 		s.walletServer.Run()
 	}()
 	log.Printf("Cüzdan sunucusu başlatıldı (Port: %d)", s.walletPort)
+
+	// P2P keşfi ve periyodik senkronizasyon. NAT arkasındaki bir node'a ağ
+	// ulaşamaz; bu çekme döngüsü + mining sonrası itme (/submit) sayesinde
+	// ev kullanıcısı da tam ağ üyesi olur.
+	go func() {
+		s.p2p.RunNodeDiscovery(5*time.Minute,
+			block.NEIGHBOR_IP_RANGE_START, block.NEIGHBOR_IP_RANGE_END,
+			block.BLOCKCHAIN_PORT_RANGE_START, block.BLOCKCHAIN_PORT_RANGE_END)
+		s.blockchain.ResolveConflicts()
+		ticker := time.NewTicker(45 * time.Second)
+		for range ticker.C {
+			s.blockchain.ResolveConflicts()
+		}
+	}()
 
 	// Mining modunda başlatıldıysa bilgi ver
 	if s.miner {

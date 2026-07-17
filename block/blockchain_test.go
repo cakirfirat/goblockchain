@@ -126,6 +126,31 @@ func TestValidChainFullValidation(t *testing.T) {
 	}
 }
 
+func TestConsiderChain(t *testing.T) {
+	a := wallet.NewWallet()
+	bc1 := minedChain(t, a.BlockchainAddress(), 3) // 4 blok (genesis + 3)
+	bc2 := NewBlockchain(wallet.NewWallet().BlockchainAddress(), 0)
+
+	// Daha fazla iş içeren zincir benimsenmeli (itme yolu: POST /submit)
+	if !bc2.ConsiderChain(bc1.Chain()) {
+		t.Fatal("daha güçlü zincir benimsenmedi")
+	}
+	if len(bc2.Chain()) != len(bc1.Chain()) {
+		t.Fatalf("zincir uzunluğu %d, beklenen %d", len(bc2.Chain()), len(bc1.Chain()))
+	}
+
+	// Aynı zincir ikinci kez benimsenmemeli (daha iyi değil)
+	if bc2.ConsiderChain(bc1.Chain()) {
+		t.Fatal("özdeş zincir yeniden benimsendi")
+	}
+
+	// Daha zayıf zincir reddedilmeli
+	bc3 := NewBlockchain(wallet.NewWallet().BlockchainAddress(), 0)
+	if bc1.ConsiderChain(bc3.Chain()) {
+		t.Fatal("daha zayıf zincir benimsendi")
+	}
+}
+
 func TestSigningPayloadMatchesWallet(t *testing.T) {
 	// wallet.Transaction ve block.Transaction imza yükleri birebir aynı olmalı;
 	// bu test ayrıştıklarında ilk kırılan yer olsun

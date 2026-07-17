@@ -12,6 +12,14 @@ import (
 // başka bir FlatunChain ağında (testnet vb.) tekrar oynatılmasını engeller.
 const NetworkID = "flatunchain-1"
 
+// DefaultCheckpointPubKeyHex, ana ağ checkpoint otoritesinin açık anahtarı
+// (159.89.31.131 droplet'inde 17 Temmuz 2026'da üretildi). Node'lar ve
+// desktop uygulaması, zincirin sahtesini gerçeğinden bu imzayla ayırır.
+const DefaultCheckpointPubKeyHex = "8d66c875b609558e43676a574a2613015d9312093693ae2be5a61bd4ecb3d787ecc86570f220028e8b6ea06eb853702dfa82d9821f49df79e2518460ab0842a7"
+
+// DefaultBootstrapURL, ağa katılım için varsayılan bootstrap sunucusu
+const DefaultBootstrapURL = "http://seed.yoxar.com:8000"
+
 // AddressFromPublicKey, açık anahtardan blockchain adresini türetir
 // (SHA-256 → RIPEMD-160 → versiyon baytı + checksum → Base58).
 // Cüzdan ve node aynı fonksiyonu kullanır; node bu sayede işlemdeki

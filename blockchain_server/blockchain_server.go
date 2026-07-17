@@ -585,6 +585,36 @@ func (bcs *BlockchainServer) Block(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+// Submit, bir peer'ın İTTİĞİ zinciri değerlendirir (POST /submit).
+// NAT arkasındaki madencilerin kazdığı bloklar ağa bu kanaldan ulaşır;
+// zincir tam doğrulamadan (ValidChain + iş kuralı + checkpoint) geçer.
+func (bcs *BlockchainServer) Submit(w http.ResponseWriter, req *http.Request) {
+	setCORSHeaders(w)
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	switch req.Method {
+	case http.MethodPost:
+		var bcResp block.Blockchain
+		if err := json.NewDecoder(req.Body).Decode(&bcResp); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+		w.Header().Add("Content-Type", "application/json")
+		if bcs.GetBlockchain().ConsiderChain(bcResp.Chain()) {
+			io.WriteString(w, string(utils.JsonStatus("success")))
+		} else {
+			io.WriteString(w, string(utils.JsonStatus("not adopted")))
+		}
+	default:
+		log.Println("ERROR: Invalid HTTP Method")
+		w.WriteHeader(http.StatusBadRequest)
+	}
+}
+
 // P2P ağını DNS Seed kullanacak şekilde yapılandır
 func (bcs *BlockchainServer) EnableDNSSeeds(enable bool) {
 	bcs.p2p.SetUseDNS(enable)
@@ -618,6 +648,7 @@ func (bcs *BlockchainServer) Run() {
 	mux.HandleFunc("/p2p/status", bcs.P2PStatus)
 	mux.HandleFunc("/block", bcs.Block)
 	mux.HandleFunc("/checkpoint", bcs.Checkpoint)
+	mux.HandleFunc("/submit", bcs.Submit)
 
 	// Log bilgilerini yazdır ve sunucuyu başlat
 	log.Printf("Blockchain Server starting on port %d with P2P network", bcs.Port())

@@ -18,7 +18,7 @@ func main() {
 	dnsSeeds := flag.String("dns-seeds", "seed.yoxar.com", "DNS seed hostname'leri (virgülle ayrılmış)")
 	dataDir := flag.String("data-dir", "data", "Zincir ve cüzdan dosyalarının yazılacağı dizin")
 	checkpointKey := flag.String("checkpoint-key", "", "Checkpoint otorite ÖZEL anahtarı (hex) — yalnızca otorite node'da")
-	checkpointPubKey := flag.String("checkpoint-pubkey", "", "Checkpoint otorite AÇIK anahtarı (hex) — doğrulama için")
+	checkpointPubKey := flag.String("checkpoint-pubkey", utils.DefaultCheckpointPubKeyHex, "Checkpoint otorite AÇIK anahtarı (hex) — doğrulama için")
 	flag.Parse()
 
 	if *dnsSeeds != "" {
