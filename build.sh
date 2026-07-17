@@ -23,8 +23,10 @@ mkdir -p build
 echo -e "${GREEN}Windows için derleniyor...${NC}"
 GOOS=windows GOARCH=amd64 go build -o build/flatuncoin-windows.exe ./cmd/standalone
 
-echo -e "${GREEN}Mac için derleniyor...${NC}"
-GOOS=darwin GOARCH=amd64 go build -o build/flatuncoin-mac ./cmd/standalone
+echo -e "${GREEN}Mac için derleniyor (Apple Silicon)...${NC}"
+# Not: dmg paketi arm64; sidecar da native arm64 olmalı (PoW hızı için önemli).
+# Intel Mac dağıtımı ileride ayrı artefakt olarak eklenecek (CI matrisi).
+GOOS=darwin GOARCH=arm64 go build -o build/flatuncoin-mac ./cmd/standalone
 
 echo -e "${GREEN}Linux için derleniyor...${NC}"
 GOOS=linux GOARCH=amd64 go build -o build/flatuncoin-linux ./cmd/standalone
