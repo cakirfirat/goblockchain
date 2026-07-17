@@ -1,0 +1,19 @@
+[Unit]
+Description=FlatunChain DNS Seed Updater (seed.yoxar.com)
+After=network-online.target flatun-bootstrap.service
+Wants=network-online.target
+
+[Service]
+User=flatun
+WorkingDirectory=/opt/flatunchain
+EnvironmentFile=/etc/flatunchain/env
+ExecStart=/opt/flatunchain/bin/dns_updater \
+    --domain=yoxar.com \
+    --subdomain=seed \
+    --bootstrap=http://127.0.0.1:8000 \
+    --interval=10
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

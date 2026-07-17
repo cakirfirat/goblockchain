@@ -54,15 +54,44 @@ func FindNeighbors(myHost string, myPort uint16, startIp uint8, endIp uint8, sta
 
 }
 
+// GetHost, bu makinenin ağdaki IPv4 adresini döndürür.
+// Önce ağ arayüzleri taranır (hostname çözümlemesi çoğu sistemde ::1 veya
+// 127.0.0.1 döndürüp P2P adresini bozuyordu); global adres önceliklidir.
 func GetHost() string {
+	addrs, err := net.InterfaceAddrs()
+	if err == nil {
+		var privateIP string
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipnet.IP.To4()
+			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+				continue
+			}
+			if ip.IsPrivate() {
+				if privateIP == "" {
+					privateIP = ip.String()
+				}
+				continue
+			}
+			// Global (public) IPv4 bulundu — en iyi aday
+			return ip.String()
+		}
+		if privateIP != "" {
+			return privateIP
+		}
+	}
+
+	// Eski davranışa geri düş
 	hostname, err := os.Hostname()
 	if err != nil {
 		return "127.0.0.1"
 	}
 	address, err := net.LookupHost(hostname)
-	if err != nil {
+	if err != nil || len(address) == 0 {
 		return "127.0.0.1"
 	}
-
 	return address[0]
 }

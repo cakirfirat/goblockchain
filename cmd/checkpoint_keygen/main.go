@@ -12,14 +12,24 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"flag"
 	"fmt"
 	"log"
 )
 
 func main() {
+	machine := flag.Bool("machine", false, "Script'ler için makine-okunur çıktı (KEY=VALUE)")
+	flag.Parse()
+
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		log.Fatalf("Anahtar üretilemedi: %v", err)
+	}
+
+	if *machine {
+		fmt.Printf("CHECKPOINT_KEY=%x\n", priv.D.Bytes())
+		fmt.Printf("CHECKPOINT_PUBKEY=%064x%064x\n", priv.PublicKey.X.Bytes(), priv.PublicKey.Y.Bytes())
+		return
 	}
 
 	fmt.Println("Checkpoint otorite anahtar çifti üretildi.")

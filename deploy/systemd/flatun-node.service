@@ -1,0 +1,21 @@
+[Unit]
+Description=FlatunChain Blockchain Node (checkpoint otoritesi)
+After=network-online.target flatun-bootstrap.service
+Wants=network-online.target
+
+[Service]
+User=flatun
+WorkingDirectory=/opt/flatunchain
+EnvironmentFile=/etc/flatunchain/env
+ExecStart=/opt/flatunchain/bin/blockchain_server \
+    --port=5001 \
+    --data-dir=/opt/flatunchain/data \
+    --bootstrap=http://127.0.0.1:8000 \
+    --dns=true \
+    --dns-seeds=seed.yoxar.com \
+    --checkpoint-key=${CHECKPOINT_KEY}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

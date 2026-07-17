@@ -29,7 +29,7 @@ var (
 	blockchainPeer = flag.String("peer", "", "Blockchain peer (ip:port) [isteğe bağlı]")
 	minerMode      = flag.Bool("miner", false, "Mining modunu aktifleştir")
 	openBrowser    = flag.Bool("open", true, "Tarayıcıyı otomatik aç")
-	dnsSeeds       = flag.String("dns-seeds", "seed.flatuncoin.com,seed2.flatuncoin.com", "DNS seed sunucuları (virgülle ayrılmış)")
+	dnsSeeds       = flag.String("dns-seeds", "seed.yoxar.com", "DNS seed sunucuları (virgülle ayrılmış)")
 	templatesDir   = flag.String("templates", "templates", "Template dosyaları dizini")
 	dataDir        = flag.String("data-dir", "data", "Zincir ve cüzdan dosyalarının yazılacağı dizin")
 )
@@ -735,6 +735,10 @@ func (ws *WalletServer) Run() {
 
 func main() {
 	flag.Parse()
+
+	if *dnsSeeds != "" {
+		utils.SetDNSSeeds(strings.Split(*dnsSeeds, ","))
+	}
 
 	// Standalone sunucuyu oluştur ve başlat
 	server := NewStandaloneServer(uint16(*walletPort), uint16(*blockchainPort), *minerMode)

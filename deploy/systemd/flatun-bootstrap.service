@@ -1,0 +1,14 @@
+[Unit]
+Description=FlatunChain Bootstrap Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=flatun
+WorkingDirectory=/opt/flatunchain
+ExecStart=/opt/flatunchain/bin/bootstrap_server --port=8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

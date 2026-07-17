@@ -42,9 +42,11 @@ wallet_pid=$!
 echo "Wallet server started with PID: $wallet_pid"
 
 # DNS Updater'ı çalıştır (DigitalOcean API token varsa)
+# Not: public IP guard'ı sayesinde yerel (private/loopback) node'lar DNS'e yazılmaz;
+# yerel geliştirmede updater fiilen sadece kayıt listeler.
 if [ -n "$DO_API_TOKEN" ]; then
   echo "DigitalOcean API token bulundu, DNS updater başlatılıyor..."
-  (cd cmd/dns_updater && go run . --domain=flatuncoin.com --subdomain=seed --interval=5) &
+  (cd cmd/dns_updater && go run . --domain=yoxar.com --subdomain=seed --bootstrap=http://localhost:8000 --interval=5) &
   dns_updater_pid=$!
   echo "DNS updater started with PID: $dns_updater_pid"
 else

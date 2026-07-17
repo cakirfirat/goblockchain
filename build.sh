@@ -23,13 +23,21 @@ cp -r wallet_server/templates/* build/templates/
 
 # Her sistem için derleme
 echo -e "${GREEN}Windows için derleniyor...${NC}"
-GOOS=windows GOARCH=amd64 go build -o build/flatuncoin-windows.exe cmd/standalone/main.go
+GOOS=windows GOARCH=amd64 go build -o build/flatuncoin-windows.exe ./cmd/standalone
 
 echo -e "${GREEN}Mac için derleniyor...${NC}"
-GOOS=darwin GOARCH=amd64 go build -o build/flatuncoin-mac cmd/standalone/main.go
+GOOS=darwin GOARCH=amd64 go build -o build/flatuncoin-mac ./cmd/standalone
 
 echo -e "${GREEN}Linux için derleniyor...${NC}"
-GOOS=linux GOARCH=amd64 go build -o build/flatuncoin-linux cmd/standalone/main.go
+GOOS=linux GOARCH=amd64 go build -o build/flatuncoin-linux ./cmd/standalone
+
+# Sunucu (droplet) binary'leri — linux/amd64
+echo -e "${GREEN}Sunucu binary'leri derleniyor (linux/amd64)...${NC}"
+mkdir -p build/server
+GOOS=linux GOARCH=amd64 go build -o build/server/blockchain_server ./blockchain_server
+GOOS=linux GOARCH=amd64 go build -o build/server/bootstrap_server ./cmd/bootstrap_server
+GOOS=linux GOARCH=amd64 go build -o build/server/dns_updater ./cmd/dns_updater
+GOOS=linux GOARCH=amd64 go build -o build/server/checkpoint_keygen ./cmd/checkpoint_keygen
 
 echo -e "${GREEN}Derleme işlemi tamamlandı!${NC}"
 echo "--------------------------------------"

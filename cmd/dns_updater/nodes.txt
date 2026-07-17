@@ -1,6 +1,4 @@
-# FlatunCoin Aktif Düğüm Listesi
+# FlatunChain ek düğüm listesi (--nodes flag'i ile kullanılır; isteğe bağlı)
+# Normal akışta node listesi bootstrap sunucusundan çekilir (--bootstrap).
 # Format: IP:PORT
-
-# Digital Ocean düğümleri
-# Kendi sunucunuzun IP adresini ve portunu buraya ekleyin
-# Örnek: 123.123.123.123:5001 
+# Örnek: 159.89.31.131:5001

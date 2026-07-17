@@ -14,10 +14,32 @@ import (
 	"time"
 )
 
-// FlatunCoin DNS seed listesi
+// DNS seed listesi — yeni node'lar ağa katılmak için bu hostname'leri çözer;
+// her seed hostname'in altında aktif omurga node'larının A kayıtları bulunur.
+// dns_updater bu kayıtları canlı tutar. --dns-seeds flag'i ile değiştirilebilir.
 var DNSSeeds = []string{
-	"seed.flatuncoin.com",
-	"seed2.flatuncoin.com",
+	"seed.yoxar.com",
+}
+
+// DNSSeedPort, DNS seed'lerden bulunan IP'lere bağlanılacak node portu
+var DNSSeedPort uint16 = 5001
+
+// SetDNSSeeds, DNS seed listesini değiştirir (virgülle ayrılmış flag'ten gelir)
+func SetDNSSeeds(seeds []string) {
+	cleaned := make([]string, 0, len(seeds))
+	for _, s := range seeds {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			cleaned = append(cleaned, s)
+		}
+	}
+	DNSSeeds = cleaned
+	log.Printf("DNS seed listesi ayarlandı: %v", DNSSeeds)
+}
+
+// SetDNSSeedPort, seed IP'lerine bağlanılacak portu değiştirir
+func SetDNSSeedPort(port uint16) {
+	DNSSeedPort = port
 }
 
 // P2PNode represents a peer in the P2P network
@@ -74,8 +96,7 @@ func (p *P2PNetwork) ResolveDNSSeeds() []string {
 
 		for _, ip := range ips {
 			if ipv4 := ip.To4(); ipv4 != nil {
-				// Varsayılan port 5001 olarak atandı, gerekirse değiştirilebilir
-				nodeAddr := fmt.Sprintf("%s:5001", ipv4.String())
+				nodeAddr := fmt.Sprintf("%s:%d", ipv4.String(), DNSSeedPort)
 				log.Printf("DNS seed'den düğüm bulundu: %s", nodeAddr)
 				nodeAddresses = append(nodeAddresses, nodeAddr)
 			}

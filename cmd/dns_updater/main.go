@@ -1,3 +1,15 @@
+// dns_updater, DNS seed kayıtlarını canlı tutar.
+//
+// Her döngüde bootstrap sunucusundan aktif node listesini çeker (ve/veya
+// --nodes dosyasını okur), erişilebilir PUBLIC IPv4 adresleri için
+// <subdomain>.<domain> altında A kaydı oluşturur; artık erişilemeyen
+// node'ların kayıtlarını siler. Yalnızca --subdomain ile eşleşen A
+// kayıtlarına dokunur — zone'daki diğer kayıtlar güvendedir.
+//
+// Kullanım (droplet üzerinde):
+//
+//	export DO_API_TOKEN=...
+//	./dns_updater --domain=yoxar.com --subdomain=seed --bootstrap=http://127.0.0.1:8000 --interval=10
 package main
 
 import (
@@ -5,7 +17,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -15,31 +27,13 @@ import (
 	"time"
 )
 
-// DigitalOcean API'si için konfigürasyon
-type DOConfig struct {
-	APIToken  string
-	Domain    string
-	SubDomain string
-}
-
-// DigitalOcean DNS kaydı
+// DigitalOcean DNS kaydı — ID, API'de SAYI olarak döner (string değil)
 type DODNSRecord struct {
-	ID       string `json:"id,omitempty"`
-	Type     string `json:"type"`
-	Name     string `json:"name"`
-	Data     string `json:"data"`
-	Priority int    `json:"priority,omitempty"`
-	Port     int    `json:"port,omitempty"`
-	TTL      int    `json:"ttl"`
-	Weight   int    `json:"weight,omitempty"`
-	Flags    int    `json:"flags,omitempty"`
-	Tag      string `json:"tag,omitempty"`
-}
-
-// DigitalOcean API Yanıtı
-type DOAPIResponse struct {
-	DomainRecord  DODNSRecord   `json:"domain_record,omitempty"`
-	DomainRecords []DODNSRecord `json:"domain_records,omitempty"`
+	ID   int64  `json:"id,omitempty"`
+	Type string `json:"type"`
+	Name string `json:"name"`
+	Data string `json:"data"`
+	TTL  int    `json:"ttl"`
 }
 
 // Aktif düğüm
@@ -50,25 +44,19 @@ type ActiveNode struct {
 
 // DigitalOcean API istemcisi
 type DOClient struct {
-	Config DOConfig
-	Client *http.Client
+	APIToken string
+	Domain   string
+	Client   *http.Client
 }
 
-// Yeni DigitalOcean istemcisi oluştur
-func NewDOClient(apiToken, domain, subDomain string) *DOClient {
+func NewDOClient(apiToken, domain string) *DOClient {
 	return &DOClient{
-		Config: DOConfig{
-			APIToken:  apiToken,
-			Domain:    domain,
-			SubDomain: subDomain,
-		},
-		Client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		APIToken: apiToken,
+		Domain:   domain,
+		Client:   &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
-// DigitalOcean API'sine istek gönder
 func (c *DOClient) sendRequest(method, url string, body []byte) ([]byte, error) {
 	req, err := http.NewRequest(method, url, bytes.NewBuffer(body))
 	if err != nil {
@@ -76,7 +64,7 @@ func (c *DOClient) sendRequest(method, url string, body []byte) ([]byte, error) 
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.Config.APIToken)
+	req.Header.Set("Authorization", "Bearer "+c.APIToken)
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
@@ -84,16 +72,24 @@ func (c *DOClient) sendRequest(method, url string, body []byte) ([]byte, error) 
 	}
 	defer resp.Body.Close()
 
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("API hatası: %s", resp.Status)
+		return nil, fmt.Errorf("API hatası: %s — %s", resp.Status, truncate(string(respBody), 200))
 	}
 
-	return ioutil.ReadAll(resp.Body)
+	return respBody, nil
 }
 
-// DNS kayıtlarını getir
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+// GetDNSRecords, domaindeki tüm kayıtları getirir
 func (c *DOClient) GetDNSRecords() ([]DODNSRecord, error) {
-	url := fmt.Sprintf("https://api.digitalocean.com/v2/domains/%s/records?per_page=100", c.Config.Domain)
+	url := fmt.Sprintf("https://api.digitalocean.com/v2/domains/%s/records?per_page=200", c.Domain)
 
 	body, err := c.sendRequest("GET", url, nil)
 	if err != nil {
@@ -103,209 +99,235 @@ func (c *DOClient) GetDNSRecords() ([]DODNSRecord, error) {
 	var response struct {
 		DomainRecords []DODNSRecord `json:"domain_records"`
 	}
-	err = json.Unmarshal(body, &response)
-	if err != nil {
+	if err := json.Unmarshal(body, &response); err != nil {
 		return nil, err
 	}
 
 	return response.DomainRecords, nil
 }
 
-// A kaydı oluştur
-func (c *DOClient) CreateDNSRecord(name, ip string) (DODNSRecord, error) {
-	url := fmt.Sprintf("https://api.digitalocean.com/v2/domains/%s/records", c.Config.Domain)
+// CreateDNSRecord, A kaydı oluşturur
+func (c *DOClient) CreateDNSRecord(name, ip string, ttl int) error {
+	url := fmt.Sprintf("https://api.digitalocean.com/v2/domains/%s/records", c.Domain)
 
 	record := DODNSRecord{
 		Type: "A",
 		Name: name,
 		Data: ip,
-		TTL:  300,
+		TTL:  ttl,
 	}
 
 	jsonData, err := json.Marshal(record)
 	if err != nil {
-		return DODNSRecord{}, err
+		return err
 	}
 
-	body, err := c.sendRequest("POST", url, jsonData)
-	if err != nil {
-		return DODNSRecord{}, err
-	}
-
-	var response struct {
-		DomainRecord DODNSRecord `json:"domain_record"`
-	}
-	err = json.Unmarshal(body, &response)
-	if err != nil {
-		return DODNSRecord{}, err
-	}
-
-	return response.DomainRecord, nil
+	_, err = c.sendRequest("POST", url, jsonData)
+	return err
 }
 
-// DNS kaydını sil
-func (c *DOClient) DeleteDNSRecord(recordID string) error {
-	url := fmt.Sprintf("https://api.digitalocean.com/v2/domains/%s/records/%s", c.Config.Domain, recordID)
+// DeleteDNSRecord, kaydı ID ile siler
+func (c *DOClient) DeleteDNSRecord(recordID int64) error {
+	url := fmt.Sprintf("https://api.digitalocean.com/v2/domains/%s/records/%d", c.Domain, recordID)
 
 	_, err := c.sendRequest("DELETE", url, nil)
 	return err
 }
 
-// Düğümün aktif olup olmadığını kontrol et
+// isNodeActive, node'a TCP bağlantısı kurmayı dener
 func isNodeActive(ip string, port int) bool {
-	address := fmt.Sprintf("%s:%d", ip, port)
+	address := net.JoinHostPort(ip, strconv.Itoa(port))
 	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
 	if err != nil {
 		return false
 	}
-	defer conn.Close()
+	conn.Close()
 	return true
 }
 
-// Düğümleri dosyadan oku
-func readNodesFromFile(filePath string) ([]ActiveNode, error) {
-	if filePath == "" {
-		return []ActiveNode{}, nil
+// isPublicIPv4: DNS'e yalnızca genel (public) IPv4 adresleri yazılır;
+// loopback/özel ağ adresleri seed kaydı olarak işe yaramaz
+func isPublicIPv4(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil || ip.To4() == nil {
+		return false
+	}
+	return !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() && !ip.IsUnspecified()
+}
+
+// nodesFromBootstrap, bootstrap sunucusundan kayıtlı aktif node listesini çeker
+func nodesFromBootstrap(bootstrapURL string) ([]ActiveNode, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(strings.TrimRight(bootstrapURL, "/") + "/nodes")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var addresses []string
+	if err := json.NewDecoder(resp.Body).Decode(&addresses); err != nil {
+		return nil, err
 	}
 
-	data, err := ioutil.ReadFile(filePath)
+	nodes := make([]ActiveNode, 0, len(addresses))
+	for _, addr := range addresses {
+		host, portStr, err := net.SplitHostPort(addr)
+		if err != nil {
+			log.Printf("Geçersiz node adresi atlandı: %s", addr)
+			continue
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			continue
+		}
+		nodes = append(nodes, ActiveNode{IP: host, Port: port})
+	}
+	return nodes, nil
+}
+
+// nodesFromFile, düğümleri dosyadan okur (her satır ip:port, # ile yorum)
+func nodesFromFile(filePath string) ([]ActiveNode, error) {
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
 	}
 
-	lines := strings.Split(string(data), "\n")
 	nodes := []ActiveNode{}
-
-	for _, line := range lines {
+	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-
-		parts := strings.Split(line, ":")
-		if len(parts) != 2 {
+		host, portStr, err := net.SplitHostPort(line)
+		if err != nil {
 			log.Printf("Geçersiz düğüm formatı: %s", line)
 			continue
 		}
-
-		port, err := strconv.Atoi(parts[1])
+		port, err := strconv.Atoi(portStr)
 		if err != nil {
-			log.Printf("Geçersiz port: %s", parts[1])
+			log.Printf("Geçersiz port: %s", portStr)
 			continue
 		}
-
-		nodes = append(nodes, ActiveNode{
-			IP:   parts[0],
-			Port: port,
-		})
+		nodes = append(nodes, ActiveNode{IP: host, Port: port})
 	}
-
 	return nodes, nil
 }
 
-// Ana fonksiyon
 func main() {
-	// Komut satırı parametreleri
-	apiToken := flag.String("token", "", "DigitalOcean API Token")
-	domain := flag.String("domain", "flatuncoin.com", "Alan adı")
-	subDomain := flag.String("subdomain", "seed", "Alt alan adı")
-	nodeFile := flag.String("nodes", "", "Düğüm listesi dosyası (her satırda ip:port)")
+	apiToken := flag.String("token", "", "DigitalOcean API Token (boşsa DO_API_TOKEN ortam değişkeni)")
+	domain := flag.String("domain", "yoxar.com", "Alan adı")
+	subDomain := flag.String("subdomain", "seed", "Seed alt alan adı (yalnızca bu isimli A kayıtlarına dokunulur)")
+	bootstrapURL := flag.String("bootstrap", "", "Bootstrap sunucusu URL'i (aktif node listesi buradan çekilir)")
+	nodeFile := flag.String("nodes", "", "Ek düğüm listesi dosyası (her satırda ip:port) [isteğe bağlı]")
 	checkInterval := flag.Int("interval", 15, "Kontrol aralığı (dakika)")
-	defaultPort := flag.Int("port", 5001, "Varsayılan port")
+	defaultPort := flag.Int("port", 5001, "Mevcut DNS kayıtlarının canlılık kontrolünde kullanılacak port")
+	ttl := flag.Int("ttl", 300, "Oluşturulan A kayıtlarının TTL değeri (saniye)")
+	once := flag.Bool("once", false, "Tek sefer çalıştır ve çık (test için)")
 	flag.Parse()
 
-	// Token kontrol et
 	if *apiToken == "" {
-		// Çevre değişkeninden token almayı dene
 		*apiToken = os.Getenv("DO_API_TOKEN")
 		if *apiToken == "" {
-			log.Fatal("DigitalOcean API token gerekli. --token parametresi veya DO_API_TOKEN çevre değişkeni kullanın.")
+			log.Fatal("DigitalOcean API token gerekli: --token parametresi veya DO_API_TOKEN ortam değişkeni")
 		}
 	}
+	if *bootstrapURL == "" && *nodeFile == "" {
+		log.Fatal("Node kaynağı gerekli: --bootstrap ve/veya --nodes verin")
+	}
 
-	// DigitalOcean istemcisi oluştur
-	client := NewDOClient(*apiToken, *domain, *subDomain)
+	client := NewDOClient(*apiToken, *domain)
 
-	// DNS güncellemesi yapacak fonksiyon
 	updateDNS := func() {
 		log.Println("DNS güncellemesi başlatılıyor...")
 
-		// Mevcut DNS kayıtlarını al
+		// 1. Aday node'ları topla
+		var candidates []ActiveNode
+		if *bootstrapURL != "" {
+			nodes, err := nodesFromBootstrap(*bootstrapURL)
+			if err != nil {
+				log.Printf("UYARI: bootstrap'tan node listesi alınamadı: %v", err)
+			} else {
+				log.Printf("Bootstrap'tan %d node alındı", len(nodes))
+				candidates = append(candidates, nodes...)
+			}
+		}
+		if *nodeFile != "" {
+			nodes, err := nodesFromFile(*nodeFile)
+			if err != nil {
+				log.Printf("UYARI: düğüm dosyası okunamadı: %v", err)
+			} else {
+				candidates = append(candidates, nodes...)
+			}
+		}
+
+		// 2. Public + erişilebilir olanları süz (tekilleştirerek)
+		activeIPs := make(map[string]bool)
+		for _, node := range candidates {
+			if activeIPs[node.IP] {
+				continue
+			}
+			if !isPublicIPv4(node.IP) {
+				log.Printf("Atlandı (public IPv4 değil): %s", node.IP)
+				continue
+			}
+			if !isNodeActive(node.IP, node.Port) {
+				log.Printf("Node aktif değil: %s:%d", node.IP, node.Port)
+				continue
+			}
+			log.Printf("Aktif node: %s:%d", node.IP, node.Port)
+			activeIPs[node.IP] = true
+		}
+
+		// 3. Mevcut seed kayıtlarını al
 		records, err := client.GetDNSRecords()
 		if err != nil {
-			log.Printf("DNS kayıtları alınamadı: %v", err)
+			log.Printf("HATA: DNS kayıtları alınamadı: %v", err)
 			return
 		}
 
-		// Alt alan adına ait DNS kayıtlarını filtrele
-		seedRecords := make(map[string]DODNSRecord)
+		seedRecords := make(map[string]DODNSRecord) // IP -> kayıt
 		for _, record := range records {
 			if record.Type == "A" && record.Name == *subDomain {
-				seedRecords[record.Data] = record // IP -> Record
+				seedRecords[record.Data] = record
 			}
 		}
+		log.Printf("Mevcut seed kaydı: %d (%s.%s)", len(seedRecords), *subDomain, *domain)
 
-		log.Printf("Mevcut DNS kayıtları: %d (%s.%s)", len(seedRecords), *subDomain, *domain)
-
-		// Aktif düğümleri kontrol et
-		var activeNodes []ActiveNode
-
-		// Dosyada belirtilen düğümleri kontrol et
-		if *nodeFile != "" {
-			fileNodes, err := readNodesFromFile(*nodeFile)
-			if err != nil {
-				log.Printf("Düğüm dosyası okunamadı: %v", err)
+		// 4. Aktif olup kaydı olmayanları ekle
+		for ip := range activeIPs {
+			if _, exists := seedRecords[ip]; exists {
+				delete(seedRecords, ip) // korunacak; silme adayı olmasın
+				continue
+			}
+			if err := client.CreateDNSRecord(*subDomain, ip, *ttl); err != nil {
+				log.Printf("HATA: DNS kaydı eklenemedi (%s): %v", ip, err)
 			} else {
-				for _, node := range fileNodes {
-					if isNodeActive(node.IP, node.Port) {
-						activeNodes = append(activeNodes, node)
-						log.Printf("Aktif düğüm bulundu: %s:%d", node.IP, node.Port)
-					} else {
-						log.Printf("Düğüm aktif değil: %s:%d", node.IP, node.Port)
-					}
-				}
+				log.Printf("DNS kaydı eklendi: %s.%s -> %s", *subDomain, *domain, ip)
 			}
 		}
 
-		// Aktif olan ve DNS'te olmayan düğümleri ekle
-		for _, node := range activeNodes {
-			if _, exists := seedRecords[node.IP]; !exists {
-				log.Printf("Yeni DNS kaydı ekleniyor: %s -> %s.%s", node.IP, *subDomain, *domain)
-				_, err := client.CreateDNSRecord(*subDomain, node.IP)
-				if err != nil {
-					log.Printf("DNS kaydı eklenemedi: %v", err)
-				} else {
-					log.Printf("DNS kaydı eklendi: %s -> %s.%s", node.IP, *subDomain, *domain)
-				}
-			} else {
-				log.Printf("DNS kaydı zaten var: %s -> %s.%s", node.IP, *subDomain, *domain)
-				// Mevcut kayıtlar listesinden çıkar (sonra silinmemesi için)
-				delete(seedRecords, node.IP)
-			}
-		}
-
-		// DNS'te olan ama artık aktif olmayan düğümleri sil
+		// 5. Kaydı olup artık aktif olmayanları sil (son bir canlılık kontrolüyle)
 		for ip, record := range seedRecords {
 			if isNodeActive(ip, *defaultPort) {
-				log.Printf("Mevcut düğüm hala aktif: %s:%d", ip, *defaultPort)
+				log.Printf("Kayıtlı node hâlâ aktif: %s:%d", ip, *defaultPort)
+				continue
+			}
+			if err := client.DeleteDNSRecord(record.ID); err != nil {
+				log.Printf("HATA: DNS kaydı silinemedi (%s, id=%d): %v", ip, record.ID, err)
 			} else {
-				log.Printf("Eski DNS kaydı siliniyor: %s (%s)", ip, record.ID)
-				err := client.DeleteDNSRecord(record.ID)
-				if err != nil {
-					log.Printf("DNS kaydı silinemedi: %v", err)
-				} else {
-					log.Printf("DNS kaydı silindi: %s", ip)
-				}
+				log.Printf("Eski DNS kaydı silindi: %s (id=%d)", ip, record.ID)
 			}
 		}
 
 		log.Println("DNS güncellemesi tamamlandı.")
 	}
 
-	// İlk güncellemeyi yap
 	updateDNS()
 
-	// Periyodik güncelleme
+	if *once {
+		return
+	}
+
 	log.Printf("Periyodik DNS güncellemesi başlatıldı. Aralık: %d dakika", *checkInterval)
 	ticker := time.NewTicker(time.Duration(*checkInterval) * time.Minute)
 	for {

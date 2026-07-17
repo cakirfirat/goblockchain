@@ -4,6 +4,7 @@ import (
 	"blockchain/utils"
 	"flag"
 	"log"
+	"strings"
 )
 
 func init() {
@@ -14,10 +15,15 @@ func main() {
 	port := flag.Uint("port", 5001, "TCP Port Number for Blockchain Server")
 	bootstrap := flag.String("bootstrap", "", "Bootstrap Server URL (optional)")
 	useDNS := flag.Bool("dns", false, "Enable DNS seed discovery (default: false)")
+	dnsSeeds := flag.String("dns-seeds", "seed.yoxar.com", "DNS seed hostname'leri (virgülle ayrılmış)")
 	dataDir := flag.String("data-dir", "data", "Zincir ve cüzdan dosyalarının yazılacağı dizin")
 	checkpointKey := flag.String("checkpoint-key", "", "Checkpoint otorite ÖZEL anahtarı (hex) — yalnızca otorite node'da")
 	checkpointPubKey := flag.String("checkpoint-pubkey", "", "Checkpoint otorite AÇIK anahtarı (hex) — doğrulama için")
 	flag.Parse()
+
+	if *dnsSeeds != "" {
+		utils.SetDNSSeeds(strings.Split(*dnsSeeds, ","))
+	}
 
 	var app *BlockchainServer
 
@@ -48,7 +54,7 @@ func main() {
 	// DNS seed desteğini aç
 	if *useDNS {
 		app.EnableDNSSeeds(true)
-		log.Printf("DNS seed discovery enabled for flatuncoin.com")
+		log.Printf("DNS seed keşfi etkin: %v", utils.DNSSeeds)
 	}
 
 	app.Run()

@@ -5,10 +5,47 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
 )
+
+// normalizeAddress, node'un bildirdiği adresi bağlantının gerçek kaynağıyla düzeltir.
+// Node kendi adresini loopback (::1, 127.x) olarak görebilir ya da NAT arkasında
+// özel IP bildirebilir; bu durumda DNS'e ve peer listesine işe yaramaz adres girer.
+// Kural: bildirilen host loopback ise, ya da özel IP olup bağlantı public bir
+// IP'den geldiyse, bağlantının kaynak IP'si kullanılır (port bildirilen kalır).
+func normalizeAddress(reported, remoteAddr string) string {
+	host, port, err := net.SplitHostPort(reported)
+	if err != nil {
+		return reported
+	}
+	remoteHost, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return reported
+	}
+
+	reportedIP := net.ParseIP(host)
+	remoteIP := net.ParseIP(remoteHost)
+	if remoteIP == nil {
+		return reported
+	}
+
+	replace := false
+	if reportedIP == nil || reportedIP.IsLoopback() || reportedIP.IsUnspecified() {
+		replace = true
+	} else if reportedIP.IsPrivate() && !remoteIP.IsPrivate() && !remoteIP.IsLoopback() {
+		replace = true
+	}
+
+	if replace && !remoteIP.IsLoopback() {
+		corrected := net.JoinHostPort(remoteHost, port)
+		log.Printf("Adres düzeltildi: %s -> %s", reported, corrected)
+		return corrected
+	}
+	return reported
+}
 
 // RegisteredNode kayıtlı bir düğümü temsil eder
 type RegisteredNode struct {
@@ -113,7 +150,7 @@ func main() {
 			return
 		}
 
-		bs.RegisterNode(req.Address)
+		bs.RegisterNode(normalizeAddress(req.Address, r.RemoteAddr))
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status": "ok"}`))
 	})
