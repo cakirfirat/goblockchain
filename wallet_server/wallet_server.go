@@ -4,18 +4,15 @@ import (
 	"blockchain/block"
 	"blockchain/utils"
 	"blockchain/wallet"
+	"blockchain/webui"
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"io"
 	"log"
 	"net/http"
-	"path"
 	"strconv"
 )
-
-const tempDir = "templates"
 
 type WalletServer struct {
 	port     uint16
@@ -36,18 +33,15 @@ func (ws *WalletServer) Gateway() string {
 func (ws *WalletServer) Index(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case http.MethodGet:
-		t, err := template.ParseFiles(path.Join(tempDir, "index.html"))
+		// Binary'ye gömülü arayüz (webui paketi) — dizinden bağımsız çalışır
+		html, err := webui.IndexHTML()
 		if err != nil {
-			log.Printf("ERROR: Template parsing failed - %s", err.Error())
+			log.Printf("ERROR: Gömülü arayüz okunamadı - %s", err.Error())
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
-		err = t.Execute(w, nil)
-		if err != nil {
-			log.Printf("ERROR: Template execution failed - %s", err.Error())
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
-		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(html)
 	default:
 		log.Printf("ERROR: Invalid HTTP Method")
 	}

@@ -16,10 +16,8 @@ cd $DIR
 echo -e "${GREEN}Build klasörü hazırlanıyor...${NC}"
 mkdir -p build
 
-# Gerekli klasörleri kopyala
-echo -e "${GREEN}Statik dosyalar kopyalanıyor...${NC}"
-mkdir -p build/templates
-cp -r wallet_server/templates/* build/templates/
+# Not: cüzdan arayüzü artık binary'ye gömülü (webui paketi) — harici
+# template kopyalamaya gerek yok
 
 # Her sistem için derleme
 echo -e "${GREEN}Windows için derleniyor...${NC}"

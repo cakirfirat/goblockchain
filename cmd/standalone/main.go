@@ -4,6 +4,7 @@ import (
 	"blockchain/block"
 	"blockchain/utils"
 	"blockchain/wallet"
+	"blockchain/webui"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -30,8 +31,8 @@ var (
 	minerMode      = flag.Bool("miner", false, "Mining modunu aktifleştir")
 	openBrowser    = flag.Bool("open", true, "Tarayıcıyı otomatik aç")
 	dnsSeeds       = flag.String("dns-seeds", "seed.yoxar.com", "DNS seed sunucuları (virgülle ayrılmış)")
-	templatesDir   = flag.String("templates", "templates", "Template dosyaları dizini")
-	dataDir        = flag.String("data-dir", "data", "Zincir ve cüzdan dosyalarının yazılacağı dizin")
+	templatesDir   = flag.String("templates", "", "Template dizini override'ı (boş = binary'ye gömülü arayüz)")
+	dataDir        = flag.String("data-dir", "", "Zincir ve cüzdan dizini (boş = işletim sistemi standart konumu)")
 	walletBind     = flag.String("bind", "127.0.0.1", "Cüzdan sunucusunun bağlanacağı adres (cüzdan API'sini dışarı AÇMAYIN)")
 	nodeBind       = flag.String("node-bind", "0.0.0.0", "Blockchain API'sinin bağlanacağı adres")
 
@@ -94,15 +95,31 @@ func loadOrCreateHDWallet(dir string) *wallet.HDWallet {
 	return hd
 }
 
+// resolveDataDir: --data-dir boşsa işletim sisteminin standart uygulama veri
+// konumu kullanılır (macOS: ~/Library/Application Support/FlatunChain,
+// Windows: %AppData%\FlatunChain, Linux: ~/.config/FlatunChain). Böylece
+// binary hangi dizinden çalıştırılırsa çalıştırılsın veriler tek yerde durur.
+func resolveDataDir() string {
+	if *dataDir != "" {
+		return *dataDir
+	}
+	if base, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(base, "FlatunChain")
+	}
+	return "data"
+}
+
 func NewStandaloneServer(walletPort, blockchainPort uint16, miner bool) *StandaloneServer {
 	blockchainAddr := fmt.Sprintf("http://localhost:%d", blockchainPort)
 
-	if err := os.MkdirAll(*dataDir, 0700); err != nil {
+	dir := resolveDataDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		log.Printf("UYARI: veri dizini oluşturulamadı: %v", err)
 	}
+	log.Printf("Veri dizini: %s", dir)
 
 	// Cüzdan oluştur/yükle (uygulamanın mining yapmak için kullanacağı cüzdan)
-	hdWallet := loadOrCreateHDWallet(*dataDir)
+	hdWallet := loadOrCreateHDWallet(dir)
 
 	// P2P katmanı: bootstrap + DNS seed keşfi ile gerçek ağa katıl
 	blockchainServer := NewBlockchainServer(blockchainPort, *bootstrapURL)
@@ -112,7 +129,7 @@ func NewStandaloneServer(walletPort, blockchainPort uint16, miner bool) *Standal
 	}
 
 	// Blockchain nesnesini oluştur (kalıcı: her blok diske yazılır)
-	chainFile := filepath.Join(*dataDir, fmt.Sprintf("blockchain_%d.json", blockchainPort))
+	chainFile := filepath.Join(dir, fmt.Sprintf("blockchain_%d.json", blockchainPort))
 	blockchain := block.NewBlockchainWithPersistence(hdWallet.BlockchainAddress, blockchainPort, chainFile)
 
 	// Peer'lar konsensüse katılır; checkpoint imzası zincirin kimliğini doğrular
@@ -463,16 +480,25 @@ func (ws *WalletServer) Gateway() string {
 func (ws *WalletServer) Index(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case http.MethodGet:
-		t, err := http.Dir(*templatesDir).Open("index.html")
+		// Geliştirme override'ı: --templates verilmişse diskten oku
+		if *templatesDir != "" {
+			if t, err := http.Dir(*templatesDir).Open("index.html"); err == nil {
+				defer t.Close()
+				http.ServeContent(w, req, "index.html", time.Now(), t)
+				return
+			}
+			log.Printf("UYARI: --templates dizininde index.html yok, gömülü arayüz kullanılıyor")
+		}
+
+		// Varsayılan: binary'ye gömülü arayüz — çalıştırılan dizinden bağımsız
+		html, err := webui.IndexHTML()
 		if err != nil {
-			log.Printf("ERROR: Template açılamadı - %s", err.Error())
+			log.Printf("ERROR: Gömülü arayüz okunamadı - %s", err.Error())
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
-		defer t.Close()
-
-		// Dosyayı oku ve istemciye gönder
-		http.ServeContent(w, req, "index.html", time.Now(), t)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(html)
 	default:
 		log.Printf("ERROR: Geçersiz HTTP Metodu")
 	}

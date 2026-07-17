@@ -40,7 +40,9 @@ function startSidecar() {
     return;
   }
 
-  const dataDir = path.join(app.getPath('userData'), 'chain');
+  // Not: standalone'ın kendi varsayılanıyla aynı konum — kullanıcı uygulamayı
+  // Electron'dan da tarayıcı modundan da açsa AYNI cüzdanı görür
+  const dataDir = app.getPath('userData');
   fs.mkdirSync(dataDir, { recursive: true });
 
   sidecar = spawn(bin, [
