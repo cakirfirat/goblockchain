@@ -29,7 +29,9 @@ var (
 	blockchainPort = flag.Uint("blockchain-port", 5001, "Blockchain sunucusu port numarası")
 	blockchainPeer = flag.String("peer", "", "Blockchain peer (ip:port) [isteğe bağlı]")
 	minerMode      = flag.Bool("miner", false, "Mining modunu aktifleştir")
-	openBrowser    = flag.Bool("open", true, "Tarayıcıyı otomatik aç")
+	// Tarayıcı otomatik AÇILMAZ: son kullanıcı ürünü Electron uygulamasıdır.
+	// Tarayıcı modu yalnızca sunucular/geliştirme için opt-in'dir (--open=true).
+	openBrowser    = flag.Bool("open", false, "Tarayıcıda cüzdan arayüzünü aç (sunucu/geliştirme modu)")
 	dnsSeeds       = flag.String("dns-seeds", "seed.yoxar.com", "DNS seed sunucuları (virgülle ayrılmış)")
 	templatesDir   = flag.String("templates", "", "Template dizini override'ı (boş = binary'ye gömülü arayüz)")
 	dataDir        = flag.String("data-dir", "", "Zincir ve cüzdan dizini (boş = işletim sistemi standart konumu)")
