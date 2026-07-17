@@ -28,11 +28,13 @@
       "category": "public.app-category.finance"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "artifactName": "FlatunChain-Setup-${version}-${arch}.${ext}"
     },
     "linux": {
       "target": "AppImage",
-      "category": "Finance"
+      "category": "Finance",
+      "artifactName": "FlatunChain-${version}-${arch}.${ext}"
     }
   },
   "devDependencies": {
