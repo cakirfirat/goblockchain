@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'">
+  <title>FlatunChain</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>⛓ FlatunChain</h1>
+      <span id="node-status" class="badge">bağlanıyor…</span>
+    </header>
+
+    <section class="card balance-card">
+      <div class="label">Bakiyen</div>
+      <div class="balance"><span id="balance">—</span> <small>FLATUN</small></div>
+      <div class="address" id="address" title="Adresin">—</div>
+    </section>
+
+    <section class="card">
+      <div class="label">Madencilik</div>
+      <p class="hint">Bilgisayarın açıkken blok kazarak FLATUN kazanırsın.</p>
+      <button id="mine-toggle" class="primary" disabled>Yükleniyor…</button>
+      <span id="mine-info" class="hint"></span>
+    </section>
+
+    <section class="card">
+      <div class="label">Para Gönder</div>
+      <input id="send-to" type="text" placeholder="Alıcı adresi" autocomplete="off" spellcheck="false">
+      <input id="send-amount" type="text" placeholder="Miktar (örn. 1.5)" autocomplete="off">
+      <button id="send-btn" class="primary">Gönder</button>
+      <span id="send-result" class="hint"></span>
+    </section>
+
+    <section class="card log-card">
+      <div class="label">Node günlüğü</div>
+      <pre id="log"></pre>
+    </section>
+  </main>
+  <script src="renderer.js"></script>
+</body>
+</html>

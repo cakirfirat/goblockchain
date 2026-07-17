@@ -32,6 +32,8 @@ var (
 	dnsSeeds       = flag.String("dns-seeds", "seed.yoxar.com", "DNS seed sunucuları (virgülle ayrılmış)")
 	templatesDir   = flag.String("templates", "templates", "Template dosyaları dizini")
 	dataDir        = flag.String("data-dir", "data", "Zincir ve cüzdan dosyalarının yazılacağı dizin")
+	walletBind     = flag.String("bind", "127.0.0.1", "Cüzdan sunucusunun bağlanacağı adres (cüzdan API'sini dışarı AÇMAYIN)")
+	nodeBind       = flag.String("node-bind", "0.0.0.0", "Blockchain API'sinin bağlanacağı adres")
 )
 
 // BlockchainServer yapısı
@@ -104,8 +106,9 @@ func NewStandaloneServer(walletPort, blockchainPort uint16, miner bool) *Standal
 	chainFile := filepath.Join(*dataDir, fmt.Sprintf("blockchain_%d.json", blockchainPort))
 	blockchain := block.NewBlockchainWithPersistence(hdWallet.BlockchainAddress, blockchainPort, chainFile)
 
-	// Cüzdan sunucusu oluştur
+	// Cüzdan sunucusu oluştur ve yerel cüzdanı bağla (sidecar endpoint'leri için)
 	walletServer := NewWalletServer(walletPort, blockchainAddr)
+	walletServer.SetLocalWallet(hdWallet)
 
 	return &StandaloneServer{
 		walletServer:      walletServer,
@@ -228,11 +231,29 @@ func (s *StandaloneServer) Run() {
 			io.WriteString(w, string(m))
 		})
 
+		mux.HandleFunc("/mine/stop", func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			s.blockchain.StopMining()
+			io.WriteString(w, string(utils.JsonStatus("success")))
+		})
+
+		mux.HandleFunc("/mine/status", func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			m, _ := json.Marshal(struct {
+				Mining bool `json:"mining"`
+				Height int  `json:"height"`
+			}{
+				Mining: s.blockchain.IsMining(),
+				Height: len(s.blockchain.GetBlocks()) - 1,
+			})
+			io.WriteString(w, string(m))
+		})
+
 		// CORS middleware'ini tüm route'lara uygula
 		handler := corsHandler(mux)
 
 		// Sunucuyu başlat
-		log.Fatal(http.ListenAndServe("0.0.0.0:"+strconv.Itoa(int(s.blockchainPort)), handler))
+		log.Fatal(http.ListenAndServe(*nodeBind+":"+strconv.Itoa(int(s.blockchainPort)), handler))
 	}()
 	log.Printf("Blockchain sunucusu başlatıldı (Port: %d)", s.blockchainPort)
 
@@ -270,8 +291,10 @@ func (s *StandaloneServer) Run() {
 	<-s.stopChan
 	log.Println("Uygulama kapatılıyor...")
 
-	// Tüm goroutine'lerin bitmesini bekle
-	s.wg.Wait()
+	// Sunucu goroutine'leri ListenAndServe içinde sonsuza dek bloklar;
+	// onları beklemek süreci asılı bırakır (Electron sidecar'ı hayalet kalır).
+	// Zincir zaten her blokta diske yazılıyor — doğrudan çıkmak güvenli.
+	os.Exit(0)
 }
 
 // Tarayıcıyı açmak için yardımcı fonksiyon
@@ -296,13 +319,20 @@ func openURL(url string) {
 
 // WalletServer yapısı ve metodları
 type WalletServer struct {
-	port    uint16
-	gateway string
-	mux     *http.ServeMux
+	port     uint16
+	gateway  string
+	mux      *http.ServeMux
+	hdWallet *wallet.HDWallet // uygulamanın yerel cüzdanı (sidecar modu için)
 }
 
 func NewWalletServer(port uint16, gateway string) *WalletServer {
-	return &WalletServer{port, gateway, http.NewServeMux()}
+	return &WalletServer{port: port, gateway: gateway, mux: http.NewServeMux()}
+}
+
+// SetLocalWallet, /wallet/info ve /wallet/send endpoint'lerinin kullanacağı
+// yerel cüzdanı bağlar (Electron sidecar modu)
+func (ws *WalletServer) SetLocalWallet(hd *wallet.HDWallet) {
+	ws.hdWallet = hd
 }
 
 func (ws *WalletServer) Port() uint16 {
@@ -691,6 +721,92 @@ func (ws *WalletServer) setupRoutes() {
 
 	// Blockchain API için proxy ekle
 	ws.mux.HandleFunc("/blockchain/", corsMiddleware(ws.BlockchainProxy))
+
+	// Sidecar (Electron) endpoint'leri — yalnızca yerel cüzdan bağlıysa
+	ws.mux.HandleFunc("/wallet/info", corsMiddleware(ws.LocalWalletInfo))
+	ws.mux.HandleFunc("/wallet/send", corsMiddleware(ws.LocalWalletSend))
+}
+
+// LocalWalletInfo, uygulamanın yerel cüzdan kimliğini döndürür (mnemonic ASLA dönmez)
+func (ws *WalletServer) LocalWalletInfo(w http.ResponseWriter, req *http.Request) {
+	if ws.hdWallet == nil {
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, string(utils.JsonStatus("no local wallet")))
+		return
+	}
+	w.Header().Add("Content-Type", "application/json")
+	m, _ := json.Marshal(struct {
+		BlockchainAddress string `json:"blockchain_address"`
+		PublicKey         string `json:"public_key"`
+	}{
+		BlockchainAddress: ws.hdWallet.BlockchainAddress,
+		PublicKey:         ws.hdWallet.PublicKeyStr(),
+	})
+	io.WriteString(w, string(m))
+}
+
+// LocalWalletSend, yerel cüzdandan imzalı işlem oluşturup node'a iletir.
+// Cüzdan sunucusu 127.0.0.1'e bağlı olduğu sürece bu endpoint yalnızca
+// aynı makinedeki uygulamadan çağrılabilir.
+func (ws *WalletServer) LocalWalletSend(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if ws.hdWallet == nil {
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, string(utils.JsonStatus("no local wallet")))
+		return
+	}
+
+	var body struct {
+		Recipient string `json:"recipient"`
+		Value     string `json:"value"` // FLATUN metni, örn. "1.5"
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Recipient == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, string(utils.JsonStatus("fail")))
+		return
+	}
+	valueUnits, err := utils.ParseFLATUN(body.Value)
+	if err != nil || valueUnits <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, string(utils.JsonStatus("invalid amount")))
+		return
+	}
+
+	transaction := ws.hdWallet.CreateTransaction(body.Recipient, valueUnits)
+	signatureStr := transaction.GenerateSignature().String()
+	pubKeyStr := ws.hdWallet.PublicKeyStr()
+	timestamp := transaction.Timestamp()
+	fee := transaction.Fee()
+
+	bt := &block.TransactionRequest{
+		SenderBlockchainAddress:    &ws.hdWallet.BlockchainAddress,
+		RecipientBlockchainAddress: &body.Recipient,
+		SenderPublicKey:            &pubKeyStr,
+		Value:                      &valueUnits,
+		Fee:                        &fee,
+		Timestamp:                  &timestamp,
+		Signature:                  &signatureStr,
+	}
+	m, _ := json.Marshal(bt)
+	resp, err := http.Post(ws.Gateway()+"/transactions", "application/json", bytes.NewBuffer(m))
+	if err != nil {
+		log.Printf("ERROR: node'a iletilemedi: %v", err)
+		w.WriteHeader(http.StatusBadGateway)
+		io.WriteString(w, string(utils.JsonStatus("fail")))
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Add("Content-Type", "application/json")
+	if resp.StatusCode == http.StatusCreated {
+		io.WriteString(w, string(utils.JsonStatus("success")))
+		return
+	}
+	w.WriteHeader(http.StatusBadRequest)
+	io.WriteString(w, string(utils.JsonStatus("fail")))
 }
 
 // BlockchainProxy, blockchain API'sine gelen istekleri yönlendirir
@@ -742,7 +858,7 @@ func (ws *WalletServer) BlockchainProxy(w http.ResponseWriter, req *http.Request
 
 func (ws *WalletServer) Run() {
 	ws.setupRoutes()
-	log.Fatal(http.ListenAndServe("0.0.0.0:"+strconv.Itoa(int(ws.Port())), ws.mux))
+	log.Fatal(http.ListenAndServe(*walletBind+":"+strconv.Itoa(int(ws.Port())), ws.mux))
 }
 
 func main() {

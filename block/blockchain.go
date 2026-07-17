@@ -213,6 +213,8 @@ type Blockchain struct {
 	checkpoint           *Checkpoint       // bilinen en yüksek doğrulanmış checkpoint
 	checkpointPrivateKey *ecdsa.PrivateKey // doluysa bu node otorite: checkpoint imzalar
 	checkpointPublicKey  *ecdsa.PublicKey  // doluysa peer checkpoint'leri doğrulanır ve uygulanır
+
+	miningActive bool // mining döngüsü çalışıyor mu (mux ile korunur)
 }
 
 // blockchainFile, diske yazılan kalıcı durum.
@@ -670,12 +672,48 @@ func (bc *Blockchain) Mining() bool {
 	return true
 }
 
+// StartMining, mining döngüsünü başlatır. Tekrarlanan çağrılar ikinci bir
+// döngü AÇMAZ (eski AfterFunc zinciri her çağrıda yeni zincir açıyordu).
 func (bc *Blockchain) StartMining() {
-	bc.Mining()
-	// Jitter: node'ların aynı anda blok üretip sürekli eşit uzunlukta
-	// fork oluşturmasını engeller
-	jitter := time.Duration(rnd.Intn(5000)) * time.Millisecond
-	_ = time.AfterFunc(time.Second*MINING_TIMER_SEC+jitter, bc.StartMining)
+	bc.mux.Lock()
+	if bc.miningActive {
+		bc.mux.Unlock()
+		return
+	}
+	bc.miningActive = true
+	bc.mux.Unlock()
+	go bc.miningLoop()
+}
+
+// StopMining, mining döngüsünü durdurur (devam eden blok tamamlanır)
+func (bc *Blockchain) StopMining() {
+	bc.mux.Lock()
+	bc.miningActive = false
+	bc.mux.Unlock()
+	log.Println("Mining durduruldu")
+}
+
+// IsMining, mining döngüsünün aktif olup olmadığını döndürür
+func (bc *Blockchain) IsMining() bool {
+	bc.mux.Lock()
+	defer bc.mux.Unlock()
+	return bc.miningActive
+}
+
+func (bc *Blockchain) miningLoop() {
+	for {
+		bc.mux.Lock()
+		active := bc.miningActive
+		bc.mux.Unlock()
+		if !active {
+			return
+		}
+		bc.Mining()
+		// Jitter: node'ların aynı anda blok üretip sürekli eşit uzunlukta
+		// fork oluşturmasını engeller
+		jitter := time.Duration(rnd.Intn(5000)) * time.Millisecond
+		time.Sleep(time.Second*MINING_TIMER_SEC + jitter)
+	}
 }
 
 func (bc *Blockchain) CalculateTotalAmount(blockchainAddress string) int64 {

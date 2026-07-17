@@ -1,0 +1,42 @@
+{
+  "name": "flatunchain-desktop",
+  "productName": "FlatunChain",
+  "version": "0.1.0",
+  "description": "FlatunChain masaüstü cüzdanı ve madencisi",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.flatunchain.desktop",
+    "productName": "FlatunChain",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**"
+    ],
+    "extraResources": [
+      {
+        "from": "sidecar",
+        "to": "sidecar"
+      }
+    ],
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.finance"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Finance"
+    }
+  },
+  "devDependencies": {
+    "electron": "^43.1.1",
+    "electron-builder": "^26.15.3"
+  }
+}

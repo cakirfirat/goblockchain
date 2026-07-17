@@ -10,3 +10,8 @@ local_node_output.txt
 
 # Sistem dosyaları
 .DS_Store
+
+# Desktop (Electron)
+desktop/node_modules/
+desktop/dist/
+desktop/sidecar/
