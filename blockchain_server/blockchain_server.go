@@ -660,8 +660,30 @@ func (bcs *BlockchainServer) Run() {
 	bc.Run()
 
 	server := &http.Server{
-		Addr:    "0.0.0.0:" + strconv.Itoa(int(bcs.Port())),
-		Handler: mux,
+		Addr:              "0.0.0.0:" + strconv.Itoa(int(bcs.Port())),
+		Handler:           limitBody(mux),
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 	log.Fatal(server.ListenAndServe())
+}
+
+// limitBody, istek gövdelerine üst sınır koyar (sınırsız gövde belleği doldurup
+// node'u çökertebilir). Zincir transferi (/submit, /consensus, /chain) büyük
+// olabildiğinden 64 MB, diğer tüm uçlar 1 MB ile sınırlanır.
+func limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var limit int64 = 1 << 20 // 1 MB
+		switch r.URL.Path {
+		case "/submit", "/consensus", "/chain", "/":
+			limit = 64 << 20 // 64 MB
+		}
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
+		next.ServeHTTP(w, r)
+	})
 }

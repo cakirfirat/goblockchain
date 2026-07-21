@@ -6,12 +6,14 @@ import (
 	"blockchain/wallet"
 	"blockchain/webui"
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -24,6 +26,38 @@ import (
 	"time"
 )
 
+// Sunucu zaman aşımları: timeout olmadan yavaş/askıda bağlantılar (slowloris)
+// kaynakları tüketebilir. Değerler zincir senkronizasyonu gibi büyük yanıtlara
+// yetecek kadar cömert tutuldu.
+const (
+	serverReadTimeout       = 15 * time.Second
+	serverReadHeaderTimeout = 10 * time.Second
+	serverWriteTimeout      = 60 * time.Second
+	serverIdleTimeout       = 120 * time.Second
+	serverMaxHeaderBytes    = 1 << 20 // 1 MB
+
+	// Gövde boyutu tavanları (MaxBytesReader): sınırsız gövde belleği doldurup
+	// node'u çökertebilir (DoS). Zincir transferi büyük olabildiğinden ayrı tavan.
+	defaultMaxBodyBytes   = 1 << 20  // 1 MB (işlem/peer/cüzdan uçları)
+	chainSyncMaxBodyBytes = 64 << 20 // 64 MB (/submit, /consensus, /chain)
+)
+
+// limitBody, istek gövdelerine üst sınır koyar. Zincir senkronizasyon uçlarına
+// yüksek, diğer tüm uçlara düşük tavan uygulanır.
+func limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limit := int64(defaultMaxBodyBytes)
+		switch r.URL.Path {
+		case "/submit", "/consensus", "/chain":
+			limit = chainSyncMaxBodyBytes
+		}
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 var (
 	walletPort     = flag.Uint("wallet-port", 8080, "Cüzdan sunucusu port numarası")
 	blockchainPort = flag.Uint("blockchain-port", 5001, "Blockchain sunucusu port numarası")
@@ -31,17 +65,58 @@ var (
 	minerMode      = flag.Bool("miner", false, "Mining modunu aktifleştir")
 	// Tarayıcı otomatik AÇILMAZ: son kullanıcı ürünü Electron uygulamasıdır.
 	// Tarayıcı modu yalnızca sunucular/geliştirme için opt-in'dir (--open=true).
-	openBrowser    = flag.Bool("open", false, "Tarayıcıda cüzdan arayüzünü aç (sunucu/geliştirme modu)")
-	dnsSeeds       = flag.String("dns-seeds", "seed.yoxar.com", "DNS seed sunucuları (virgülle ayrılmış)")
-	templatesDir   = flag.String("templates", "", "Template dizini override'ı (boş = binary'ye gömülü arayüz)")
-	dataDir        = flag.String("data-dir", "", "Zincir ve cüzdan dizini (boş = işletim sistemi standart konumu)")
-	walletBind     = flag.String("bind", "127.0.0.1", "Cüzdan sunucusunun bağlanacağı adres (cüzdan API'sini dışarı AÇMAYIN)")
-	nodeBind       = flag.String("node-bind", "0.0.0.0", "Blockchain API'sinin bağlanacağı adres")
+	openBrowser  = flag.Bool("open", false, "Tarayıcıda cüzdan arayüzünü aç (sunucu/geliştirme modu)")
+	dnsSeeds     = flag.String("dns-seeds", "seed.yoxar.com", "DNS seed sunucuları (virgülle ayrılmış)")
+	templatesDir = flag.String("templates", "", "Template dizini override'ı (boş = binary'ye gömülü arayüz)")
+	dataDir      = flag.String("data-dir", "", "Zincir ve cüzdan dizini (boş = işletim sistemi standart konumu)")
+	walletBind   = flag.String("bind", "127.0.0.1", "Cüzdan sunucusunun bağlanacağı adres (cüzdan API'sini dışarı AÇMAYIN)")
+	// Sunucu (droplet) node'ları gelen P2P bağlantıları için 0.0.0.0'a bağlanır.
+	// Masaüstü (Electron) 127.0.0.1 geçirir: dışa dinlemeyen node, NAT arkasındaki
+	// node ile aynı şekilde çekme döngüsü + /submit itmesiyle tam ağ üyesi kalır.
+	nodeBind = flag.String("node-bind", "0.0.0.0", "Blockchain API'sinin bağlanacağı adres (masaüstü: 127.0.0.1)")
 
 	bootstrapURL     = flag.String("bootstrap", utils.DefaultBootstrapURL, "Bootstrap sunucusu URL'i")
 	useDNS           = flag.Bool("dns", true, "DNS seed keşfini etkinleştir")
 	checkpointPubKey = flag.String("checkpoint-pubkey", utils.DefaultCheckpointPubKeyHex, "Checkpoint otorite AÇIK anahtarı (hex)")
+
+	// Tek seferlik cüzdan aracı: sunucu başlatmadan çalışır ve çıkar.
+	// Electron onboarding'i bu modla mnemonic üretir/doğrular; böylece tüm
+	// BIP-39 kriptosu Go tarafında kalır (JS'e ikinci bir implementasyon girmez).
+	walletTool = flag.String("wallet-tool", "", "Tek seferlik cüzdan aracı: generate | inspect (mnemonic'i FLATUN_WALLET_MNEMONIC env'inden okur)")
 )
+
+// runWalletTool, stdout'a YALNIZCA JSON yazar (log paketi stderr'e gider).
+// Çıkış kodları: 0 = başarı, 2 = kullanım hatası, 3 = geçersiz mnemonic.
+func runWalletTool(mode string) {
+	switch mode {
+	case "generate":
+		hd := wallet.NewHDWallet()
+		out, _ := json.Marshal(struct {
+			Mnemonic          string `json:"mnemonic"`
+			BlockchainAddress string `json:"blockchain_address"`
+		}{hd.Mnemonic, hd.BlockchainAddress})
+		fmt.Println(string(out))
+	case "inspect":
+		// Mnemonic argv ile DEĞİL env ile alınır: argv `ps` çıktısında görünür
+		mnemonic := wallet.NormalizeMnemonic(os.Getenv("FLATUN_WALLET_MNEMONIC"))
+		if mnemonic == "" {
+			fmt.Fprintln(os.Stderr, "HATA: FLATUN_WALLET_MNEMONIC env değişkeni boş")
+			os.Exit(2)
+		}
+		if !wallet.ValidateMnemonic(mnemonic) {
+			fmt.Fprintln(os.Stderr, "HATA: geçersiz mnemonic (BIP-39 sözlük/checksum doğrulaması başarısız)")
+			os.Exit(3)
+		}
+		hd := wallet.NewHDWalletFromMnemonic(mnemonic, "")
+		out, _ := json.Marshal(struct {
+			BlockchainAddress string `json:"blockchain_address"`
+		}{hd.BlockchainAddress})
+		fmt.Println(string(out))
+	default:
+		fmt.Fprintf(os.Stderr, "HATA: bilinmeyen wallet-tool modu: %q (generate | inspect)\n", mode)
+		os.Exit(2)
+	}
+}
 
 // BlockchainServer yapısı
 type BlockchainServer struct {
@@ -65,13 +140,54 @@ type StandaloneServer struct {
 	walletPrivateKey  string
 	walletPublicKey   string
 	miner             bool
+	nodeToken         string // doluysa mining kontrol uçları bu token'ı ZORUNLU kılar (Electron)
 	stopChan          chan os.Signal
 	wg                sync.WaitGroup
 }
 
-// loadOrCreateHDWallet, standalone node'un mining cüzdanını diskte saklar;
-// yeniden başlatmada aynı mnemonic'ten aynı cüzdan yüklenir ve ödüller kaybolmaz
+// nodeGuard, mining kontrol uçlarını yetkisiz isteklerden korur. Electron
+// sidecar'ı spawn ederken rastgele bir FLATUN_NODE_TOKEN üretir; token
+// yapılandırılmışsa yalnızca doğru X-Flatun-Node-Token başlıklı istekler geçer.
+// Aynı LAN'daki bir saldırgan ya da tarayıcıdaki çapraz-köken bir sayfa
+// token'ı bilemeyeceği için kullanıcının CPU'sunda madenciliği açıp kapatamaz.
+// Token yoksa (sunucu/geliştirme modu) eski davranış aynen sürer.
+func (s *StandaloneServer) nodeGuard(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.nodeToken != "" {
+			got := r.Header.Get("X-Flatun-Node-Token")
+			if subtle.ConstantTimeCompare([]byte(got), []byte(s.nodeToken)) != 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				io.WriteString(w, string(utils.JsonStatus("forbidden")))
+				return
+			}
+		}
+		h(w, r)
+	}
+}
+
+// loadOrCreateHDWallet, standalone node'un mining cüzdanını yükler.
+//
+// İki mod vardır:
+//   - Electron (masaüstü) modu: mnemonic FLATUN_WALLET_MNEMONIC env'i ile
+//     gelir. Şifreli cüzdan dosyasını Electron safeStorage ile çözer; Go
+//     tarafı diske DÜZ METİN YAZMAZ ve dosya okumaz.
+//   - Sunucu/geliştirme modu (env yok): eski davranış — mnemonic
+//     standalone_wallet.json'da saklanır, yoksa oluşturulur; yeniden
+//     başlatmada aynı cüzdan yüklenir ve mining ödülleri kaybolmaz.
 func loadOrCreateHDWallet(dir string) *wallet.HDWallet {
+	if env := os.Getenv("FLATUN_WALLET_MNEMONIC"); env != "" {
+		mnemonic := wallet.NormalizeMnemonic(env)
+		// Bozuk mnemonic'le sessizce bambaşka bir cüzdan türetmek para kaybı
+		// demektir — açık hatayla çıkmak tek güvenli davranış.
+		if !wallet.ValidateMnemonic(mnemonic) {
+			log.Fatal("FLATUN_WALLET_MNEMONIC geçersiz (BIP-39 doğrulaması başarısız); cüzdan dosyanız bozulmuş olabilir")
+		}
+		hd := wallet.NewHDWalletFromMnemonic(mnemonic, "")
+		log.Printf("Cüzdan güvenli kanaldan yüklendi (env): %s", hd.BlockchainAddress)
+		return hd
+	}
+
 	path := filepath.Join(dir, "standalone_wallet.json")
 
 	if data, err := os.ReadFile(path); err == nil {
@@ -144,6 +260,22 @@ func NewStandaloneServer(walletPort, blockchainPort uint16, miner bool) *Standal
 	walletServer := NewWalletServer(walletPort, blockchainAddr)
 	walletServer.SetLocalWallet(hdWallet)
 
+	// Electron sidecar spawn ederken FLATUN_WALLET_TOKEN geçirir; doluysa
+	// hassas cüzdan uçları yalnızca bu token'la çağrılabilir (çapraz-köken
+	// tarayıcı saldırılarına karşı kilit).
+	if tok := os.Getenv("FLATUN_WALLET_TOKEN"); tok != "" {
+		walletServer.SetAuthToken(tok)
+		log.Printf("Cüzdan API'si token ile korunuyor")
+	}
+
+	// Node API'sinin mining kontrol uçları için ayrı token (Electron geçirir).
+	// Cüzdan token'ından bilinçli olarak ayrıdır: node API'si P2P nedeniyle
+	// dışa açılabilir, cüzdan token'ının o yüzeye sızmaması gerekir.
+	nodeToken := os.Getenv("FLATUN_NODE_TOKEN")
+	if nodeToken != "" {
+		log.Printf("Mining uçları token ile korunuyor")
+	}
+
 	return &StandaloneServer{
 		walletServer:      walletServer,
 		blockchainServer:  blockchainServer,
@@ -155,6 +287,7 @@ func NewStandaloneServer(walletPort, blockchainPort uint16, miner bool) *Standal
 		walletPrivateKey:  hdWallet.PrivateKeyStr(),
 		walletPublicKey:   hdWallet.PublicKeyStr(),
 		miner:             miner,
+		nodeToken:         nodeToken,
 		stopChan:          make(chan os.Signal, 1),
 	}
 }
@@ -333,7 +466,9 @@ func (s *StandaloneServer) Run() {
 			}
 		})
 
-		mux.HandleFunc("/mine", func(w http.ResponseWriter, req *http.Request) {
+		// Mining uçları nodeGuard ile korunur: madencilik kullanıcının CPU'sunu
+		// harcar, uzaktan/çapraz-köken tetiklenememeli (token yoksa açık kalır).
+		mux.HandleFunc("/mine", s.nodeGuard(func(w http.ResponseWriter, req *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			isMined := s.blockchain.Mining()
 
@@ -344,38 +479,68 @@ func (s *StandaloneServer) Run() {
 				m = utils.JsonStatus("success")
 			}
 			io.WriteString(w, string(m))
-		})
+		}))
 
-		mux.HandleFunc("/mine/start", func(w http.ResponseWriter, req *http.Request) {
+		mux.HandleFunc("/mine/start", s.nodeGuard(func(w http.ResponseWriter, req *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			s.blockchain.StartMining()
 			m := utils.JsonStatus("success")
 			io.WriteString(w, string(m))
-		})
+		}))
 
-		mux.HandleFunc("/mine/stop", func(w http.ResponseWriter, req *http.Request) {
+		mux.HandleFunc("/mine/stop", s.nodeGuard(func(w http.ResponseWriter, req *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			s.blockchain.StopMining()
 			io.WriteString(w, string(utils.JsonStatus("success")))
-		})
+		}))
 
-		mux.HandleFunc("/mine/status", func(w http.ResponseWriter, req *http.Request) {
+		// Zengin durum: arayüzün "mining core" paneli bunu 1-2 sn'de bir çeker.
+		// StatsForUI bloklamaz — PoW kilidi meşgulken bile canlı hash sayacı döner.
+		mux.HandleFunc("/mine/status", s.nodeGuard(func(w http.ResponseWriter, req *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
+			st := s.blockchain.StatsForUI(s.blockchainAddress)
 			m, _ := json.Marshal(struct {
-				Mining bool `json:"mining"`
-				Height int  `json:"height"`
+				Mining        bool   `json:"mining"`
+				Height        int    `json:"height"`
+				Difficulty    int    `json:"difficulty"`
+				Pool          int    `json:"pool"`
+				LastBlockTime int64  `json:"last_block_time"`
+				LastBlockHash string `json:"last_block_hash"`
+				LastMiningMs  int64  `json:"last_mining_ms"`
+				HashAttempts  int64  `json:"hash_attempts"`
+				BlocksByMe    int    `json:"blocks_by_me"`
+				RewardByMe    int64  `json:"reward_by_me"`
+				Busy          bool   `json:"busy"`
 			}{
-				Mining: s.blockchain.IsMining(),
-				Height: len(s.blockchain.GetBlocks()) - 1,
+				Mining:        s.blockchain.IsMining(),
+				Height:        st.Height,
+				Difficulty:    st.Difficulty,
+				Pool:          st.PoolSize,
+				LastBlockTime: st.LastBlockTime,
+				LastBlockHash: st.LastBlockHash,
+				LastMiningMs:  st.LastMiningMs,
+				HashAttempts:  st.HashAttempts,
+				BlocksByMe:    st.BlocksByMe,
+				RewardByMe:    st.RewardByMe,
+				Busy:          st.Busy,
 			})
 			io.WriteString(w, string(m))
-		})
+		}))
 
-		// CORS middleware'ini tüm route'lara uygula
-		handler := corsHandler(mux)
+		// CORS + gövde boyutu sınırı tüm route'lara uygulanır
+		handler := limitBody(corsHandler(mux))
 
-		// Sunucuyu başlat
-		log.Fatal(http.ListenAndServe(*nodeBind+":"+strconv.Itoa(int(s.blockchainPort)), handler))
+		// Sunucuyu timeout'larla başlat (slowloris / askıda bağlantı koruması)
+		srv := &http.Server{
+			Addr:              *nodeBind + ":" + strconv.Itoa(int(s.blockchainPort)),
+			Handler:           handler,
+			ReadTimeout:       serverReadTimeout,
+			ReadHeaderTimeout: serverReadHeaderTimeout,
+			WriteTimeout:      serverWriteTimeout,
+			IdleTimeout:       serverIdleTimeout,
+			MaxHeaderBytes:    serverMaxHeaderBytes,
+		}
+		log.Fatal(srv.ListenAndServe())
 	}()
 	log.Printf("Blockchain sunucusu başlatıldı (Port: %d)", s.blockchainPort)
 
@@ -455,14 +620,22 @@ func openURL(url string) {
 
 // WalletServer yapısı ve metodları
 type WalletServer struct {
-	port     uint16
-	gateway  string
-	mux      *http.ServeMux
-	hdWallet *wallet.HDWallet // uygulamanın yerel cüzdanı (sidecar modu için)
+	port      uint16
+	gateway   string
+	mux       *http.ServeMux
+	hdWallet  *wallet.HDWallet // uygulamanın yerel cüzdanı (sidecar modu için)
+	authToken string           // doluysa hassas uçlar bu token'ı ZORUNLU kılar (Electron)
 }
 
 func NewWalletServer(port uint16, gateway string) *WalletServer {
 	return &WalletServer{port: port, gateway: gateway, mux: http.NewServeMux()}
+}
+
+// SetAuthToken, cüzdan API'sinin hassas uçlarını koruyan gizli token'ı ayarlar.
+// Electron sidecar'ı spawn ederken rastgele üretip FLATUN_WALLET_TOKEN ile geçirir;
+// token'ı bilmeyen (özellikle çapraz-köken tarayıcı) istekler reddedilir.
+func (ws *WalletServer) SetAuthToken(t string) {
+	ws.authToken = t
 }
 
 // SetLocalWallet, /wallet/info ve /wallet/send endpoint'lerinin kullanacağı
@@ -559,15 +732,23 @@ func (ws *WalletServer) ImportHDWallet(w http.ResponseWriter, req *http.Request)
 			return
 		}
 
-		// Mnemonic boş olmamalı
-		if hdWalletRequest.Mnemonic == "" {
+		// İçe aktarma sınırında BIP-39 doğrulaması ZORUNLU: bip39.NewSeed her
+		// metni kabul eder; yazım hatalı mnemonic sessizce bambaşka (boş) bir
+		// cüzdan açar ve kullanıcı parasına ulaşamadığını sanır.
+		mnemonic := wallet.NormalizeMnemonic(hdWalletRequest.Mnemonic)
+		if mnemonic == "" {
 			log.Println("ERROR: Mnemonic is required")
 			io.WriteString(w, string(utils.JsonStatus("fail")))
 			return
 		}
+		if !wallet.ValidateMnemonic(mnemonic) {
+			log.Println("ERROR: gecersiz mnemonic (BIP-39)")
+			io.WriteString(w, string(utils.JsonStatus("invalid mnemonic")))
+			return
+		}
 
 		// HD cüzdan oluştur
-		hdWallet := wallet.NewHDWalletFromMnemonic(hdWalletRequest.Mnemonic, hdWalletRequest.Passphrase)
+		hdWallet := wallet.NewHDWalletFromMnemonic(mnemonic, hdWalletRequest.Passphrase)
 		walletData, err := hdWallet.MarshalJSON()
 
 		if err != nil {
@@ -664,6 +845,11 @@ func (ws *WalletServer) CreateTransaction(w http.ResponseWriter, req *http.Reque
 			io.WriteString(w, string(utils.JsonStatus("fail")))
 			return
 		}
+		if !utils.IsValidAddress(*t.RecipientBlockchainAddress) {
+			log.Println("ERROR: gecersiz alici adresi")
+			io.WriteString(w, string(utils.JsonStatus("invalid recipient")))
+			return
+		}
 
 		publicKey := utils.PublicKeyFromString(*t.SenderPublicKey)
 		privateKey := utils.PrivateKeyFromString(*t.SenderPrivateKey, publicKey)
@@ -734,6 +920,11 @@ func (ws *WalletServer) CreateHDTransaction(w http.ResponseWriter, req *http.Req
 		if t.Mnemonic == "" || t.RecipientBlockchainAddress == "" {
 			log.Println("ERROR: missing mnemonic or recipient address")
 			io.WriteString(w, string(utils.JsonStatus("fail")))
+			return
+		}
+		if !utils.IsValidAddress(t.RecipientBlockchainAddress) {
+			log.Println("ERROR: gecersiz alici adresi")
+			io.WriteString(w, string(utils.JsonStatus("invalid recipient")))
 			return
 		}
 
@@ -837,39 +1028,77 @@ func (ws *WalletServer) WalletAmount(w http.ResponseWriter, req *http.Request) {
 }
 
 func (ws *WalletServer) setupRoutes() {
-	// CORS middleware'ini cüzdan sunucusu için tanımla
-	corsMiddleware := func(handler http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+	// Index (HTML) herkese açık: hassas veri döndürmez, yalnızca arayüzü sunar.
+	ws.mux.HandleFunc("/", ws.openHandler(ws.Index))
 
-			if r.Method == "OPTIONS" {
-				w.WriteHeader(http.StatusOK)
-				return
-			}
+	// Hassas uçlar guard ile korunur (token veya aynı-köken). Kötü niyetli bir
+	// web sayfasının 127.0.0.1'e çapraz-köken istekle cüzdanı boşaltmasını engeller.
+	ws.mux.HandleFunc("/wallet", ws.guard(ws.Wallet))
+	ws.mux.HandleFunc("/wallet/amount", ws.guard(ws.WalletAmount))
+	ws.mux.HandleFunc("/transaction", ws.guard(ws.CreateTransaction))
 
-			handler(w, r)
-		}
-	}
+	// HD cüzdan endpointleri (mnemonic alır — korunmalı)
+	ws.mux.HandleFunc("/wallet/hd/import", ws.guard(ws.ImportHDWallet))
+	ws.mux.HandleFunc("/wallet/hd/derive", ws.guard(ws.DeriveAddresses))
+	ws.mux.HandleFunc("/transaction/hd", ws.guard(ws.CreateHDTransaction))
 
-	// Route'ları CORS middleware ile birlikte ayarla
-	ws.mux.HandleFunc("/", corsMiddleware(ws.Index))
-	ws.mux.HandleFunc("/wallet", corsMiddleware(ws.Wallet))
-	ws.mux.HandleFunc("/wallet/amount", corsMiddleware(ws.WalletAmount))
-	ws.mux.HandleFunc("/transaction", corsMiddleware(ws.CreateTransaction))
-
-	// HD cüzdan endpointleri
-	ws.mux.HandleFunc("/wallet/hd/import", corsMiddleware(ws.ImportHDWallet))
-	ws.mux.HandleFunc("/wallet/hd/derive", corsMiddleware(ws.DeriveAddresses))
-	ws.mux.HandleFunc("/transaction/hd", corsMiddleware(ws.CreateHDTransaction))
-
-	// Blockchain API için proxy ekle
-	ws.mux.HandleFunc("/blockchain/", corsMiddleware(ws.BlockchainProxy))
+	// Blockchain API proxy (node'a erişebilir — korunmalı)
+	ws.mux.HandleFunc("/blockchain/", ws.guard(ws.BlockchainProxy))
 
 	// Sidecar (Electron) endpoint'leri — yalnızca yerel cüzdan bağlıysa
-	ws.mux.HandleFunc("/wallet/info", corsMiddleware(ws.LocalWalletInfo))
-	ws.mux.HandleFunc("/wallet/send", corsMiddleware(ws.LocalWalletSend))
+	ws.mux.HandleFunc("/wallet/info", ws.guard(ws.LocalWalletInfo))
+	ws.mux.HandleFunc("/wallet/send", ws.guard(ws.LocalWalletSend))
+}
+
+// openHandler, hassas olmayan uçlar için basit sarmalayıcı (OPTIONS'a 200 döner).
+func (ws *WalletServer) openHandler(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		h(w, r)
+	}
+}
+
+// guard, hassas cüzdan uçlarını yetkisiz (özellikle çapraz-köken tarayıcı)
+// isteklerinden korur. Bilinçli olarak izin verici CORS başlığı EKLEMEZ:
+// meşru çağıranlar Electron ana süreci (token'lı) veya aynı-köken tarayıcı
+// arayüzüdür; ikisi de CORS'a ihtiyaç duymaz. Çapraz-köken bir sayfanın
+// preflight'ı Allow-Origin görmediği için başarısız olur.
+func (ws *WalletServer) guard(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if !ws.isTrustedRequest(r) {
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, string(utils.JsonStatus("forbidden")))
+			return
+		}
+		h(w, r)
+	}
+}
+
+// isTrustedRequest: token yapılandırılmışsa (Electron modu) yalnızca doğru
+// token'lı istekler geçer — çapraz-köken bir tarayıcı sayfası token'ı bilemez.
+// Token yoksa (tarayıcı/geliştirme modu) yalnızca aynı-köken ya da köken
+// başlığı taşımayan (tarayıcı-dışı) istekler kabul edilir.
+func (ws *WalletServer) isTrustedRequest(r *http.Request) bool {
+	if ws.authToken != "" {
+		got := r.Header.Get("X-Flatun-Token")
+		return subtle.ConstantTimeCompare([]byte(got), []byte(ws.authToken)) == 1
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Host == r.Host
 }
 
 // LocalWalletInfo, uygulamanın yerel cüzdan kimliğini döndürür (mnemonic ASLA dönmez)
@@ -911,6 +1140,12 @@ func (ws *WalletServer) LocalWalletSend(w http.ResponseWriter, req *http.Request
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Recipient == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		io.WriteString(w, string(utils.JsonStatus("fail")))
+		return
+	}
+	// Alıcı adresini imzalamadan önce doğrula: geçersiz/typolu adrese giden para kaybolur
+	if !utils.IsValidAddress(body.Recipient) {
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, string(utils.JsonStatus("invalid recipient")))
 		return
 	}
 	valueUnits, err := utils.ParseFLATUN(body.Value)
@@ -1003,11 +1238,26 @@ func (ws *WalletServer) BlockchainProxy(w http.ResponseWriter, req *http.Request
 
 func (ws *WalletServer) Run() {
 	ws.setupRoutes()
-	log.Fatal(http.ListenAndServe(*walletBind+":"+strconv.Itoa(int(ws.Port())), ws.mux))
+	srv := &http.Server{
+		Addr:              *walletBind + ":" + strconv.Itoa(int(ws.Port())),
+		Handler:           limitBody(ws.mux),
+		ReadTimeout:       serverReadTimeout,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		WriteTimeout:      serverWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
+		MaxHeaderBytes:    serverMaxHeaderBytes,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 func main() {
 	flag.Parse()
+
+	// Tek seferlik cüzdan aracı: sunucuları hiç başlatmadan çalış ve çık
+	if *walletTool != "" {
+		runWalletTool(*walletTool)
+		return
+	}
 
 	if *dnsSeeds != "" {
 		utils.SetDNSSeeds(strings.Split(*dnsSeeds, ","))
