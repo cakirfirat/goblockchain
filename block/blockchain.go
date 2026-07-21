@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -214,7 +215,77 @@ type Blockchain struct {
 	checkpointPrivateKey *ecdsa.PrivateKey // doluysa bu node otorite: checkpoint imzalar
 	checkpointPublicKey  *ecdsa.PublicKey  // doluysa peer checkpoint'leri doğrulanır ve uygulanır
 
-	miningActive bool // mining döngüsü çalışıyor mu (mux ile korunur)
+	// miningActive atomiktir: PoW global mutex'i uzun süre tutabildiğinden,
+	// durum sorguları (IsMining) kilide takılmadan yanıt verebilmeli.
+	miningActive atomic.Bool
+
+	// Arayüz telemetrisi (konsensüse etkisi YOK). hashAttempts PoW döngüsünde
+	// atomik artar ki mutex tutulurken bile /mine/status okuyabilsin;
+	// statsCache, kilit meşgulken son bilinen anlık görüntüyü sunar.
+	hashAttempts atomic.Int64 // süreç ömrü boyunca toplam PoW denemesi
+	statsCache   atomic.Pointer[MiningStats]
+}
+
+// MiningStats, arayüzün madenciliği "hissettirmesi" için toplanan anlık
+// görüntü. Konsensüs verisi değildir; yalnızca yerel gösterim içindir.
+type MiningStats struct {
+	Height        int    // zincir yüksekliği (genesis = 0)
+	Difficulty    int    // bir sonraki blok için mevcut zorluk
+	PoolSize      int    // bekleyen işlem sayısı
+	LastBlockTime int64  // son bloğun zaman damgası (unix ns)
+	LastBlockHash string // son bloğun hash'i (hex)
+	LastMiningMs  int64  // son kazılan bloğun PoW süresi (ms)
+	HashAttempts  int64  // süreç başından beri toplam PoW denemesi
+	BlocksByMe    int    // bu adresin kazdığı blok sayısı
+	RewardByMe    int64  // bu adresin toplam coinbase ödülü (alt birim)
+	Busy          bool   // global kilit meşguldü; değerler son bilinen görüntü
+}
+
+// statsLocked, bc.mux tutulurken çağrılmalıdır.
+func (bc *Blockchain) statsLocked(address string) MiningStats {
+	st := MiningStats{
+		Height:       len(bc.chain) - 1,
+		Difficulty:   bc.currentDifficulty,
+		PoolSize:     len(bc.transactionPool),
+		LastMiningMs: bc.lastMiningTime / 1e6,
+		HashAttempts: bc.hashAttempts.Load(),
+	}
+	if len(bc.chain) > 0 {
+		last := bc.chain[len(bc.chain)-1]
+		st.LastBlockTime = last.timestamp
+		st.LastBlockHash = last.HashStr()
+	}
+	if address != "" {
+		for _, b := range bc.chain {
+			for _, t := range b.transactions {
+				if t.senderBlockchainAddress == MINING_SENDER &&
+					t.recipientBlockchainAddress == address {
+					st.BlocksByMe++
+					st.RewardByMe += t.value
+				}
+			}
+		}
+	}
+	return st
+}
+
+// StatsForUI hiçbir zaman bloklamaz: kilit alınabiliyorsa taze görüntü döner
+// ve önbelleğe yazılır; PoW kilidi tutuyorsa son görüntü + CANLI hash sayacı
+// döner. Böylece arayüz, node blok kazarken bile akıcı kalır.
+func (bc *Blockchain) StatsForUI(address string) MiningStats {
+	if bc.mux.TryLock() {
+		st := bc.statsLocked(address)
+		bc.mux.Unlock()
+		bc.statsCache.Store(&st)
+		return st
+	}
+	st := MiningStats{Busy: true, HashAttempts: bc.hashAttempts.Load()}
+	if cached := bc.statsCache.Load(); cached != nil {
+		st = *cached
+		st.Busy = true
+		st.HashAttempts = bc.hashAttempts.Load()
+	}
+	return st
 }
 
 // blockchainFile, diske yazılan kalıcı durum.
@@ -550,6 +621,13 @@ func (bc *Blockchain) addTransactionLocked(sender string, recipient string, valu
 		return false
 	}
 
+	// Alıcı adresi geçerli bir FlatunChain adresi olmalı (biçim + checksum);
+	// yanlış yazılmış bir adrese gönderilen para geri alınamaz biçimde kaybolur.
+	if !utils.IsValidAddress(recipient) {
+		log.Println("ERROR: Gecersiz alici adresi (checksum dogrulamasi basarisiz)")
+		return false
+	}
+
 	publicKeyStr := fmt.Sprintf("%064x%064x", senderPublicKey.X.Bytes(), senderPublicKey.Y.Bytes())
 	t := NewSignedTransaction(sender, recipient, value, fee, timestamp, publicKeyStr, s.String())
 
@@ -618,6 +696,7 @@ func (bc *Blockchain) proofOfWorkLocked() int {
 
 	for !bc.ValidProof(nonce, previousHash, transactions, bc.currentDifficulty) {
 		nonce += 1
+		bc.hashAttempts.Add(1)
 	}
 
 	bc.lastMiningTime = time.Now().UnixNano() - miningStart
@@ -684,39 +763,30 @@ func (bc *Blockchain) Mining() bool {
 }
 
 // StartMining, mining döngüsünü başlatır. Tekrarlanan çağrılar ikinci bir
-// döngü AÇMAZ (eski AfterFunc zinciri her çağrıda yeni zincir açıyordu).
+// döngü AÇMAZ (CompareAndSwap bunu atomik garanti eder).
 func (bc *Blockchain) StartMining() {
-	bc.mux.Lock()
-	if bc.miningActive {
-		bc.mux.Unlock()
+	if !bc.miningActive.CompareAndSwap(false, true) {
 		return
 	}
-	bc.miningActive = true
-	bc.mux.Unlock()
 	go bc.miningLoop()
 }
 
-// StopMining, mining döngüsünü durdurur (devam eden blok tamamlanır)
+// StopMining, mining döngüsünü durdurur (devam eden blok tamamlanır).
+// Atomik bayrak sayesinde PoW kilidi beklemeden anında işler — arayüzdeki
+// "Durdur" butonu blok kazımı sürerken bile takılmaz.
 func (bc *Blockchain) StopMining() {
-	bc.mux.Lock()
-	bc.miningActive = false
-	bc.mux.Unlock()
+	bc.miningActive.Store(false)
 	log.Println("Mining durduruldu")
 }
 
-// IsMining, mining döngüsünün aktif olup olmadığını döndürür
+// IsMining, mining döngüsünün aktif olup olmadığını döndürür (kilitsiz)
 func (bc *Blockchain) IsMining() bool {
-	bc.mux.Lock()
-	defer bc.mux.Unlock()
-	return bc.miningActive
+	return bc.miningActive.Load()
 }
 
 func (bc *Blockchain) miningLoop() {
 	for {
-		bc.mux.Lock()
-		active := bc.miningActive
-		bc.mux.Unlock()
-		if !active {
+		if !bc.miningActive.Load() {
 			return
 		}
 		bc.Mining()
@@ -1168,6 +1238,12 @@ func (tr *TransactionRequest) Validate() bool {
 		tr.Value == nil ||
 		tr.Timestamp == nil ||
 		tr.Signature == nil {
+		return false
+	}
+	// Uzunluk guard'ı: açık anahtar ve imza tam 128 hex karakter olmalı.
+	// Aksi halde PublicKeyFromString/SignatureFromString'e giden kısa/bozuk
+	// girdi eskiden slice taşmasıyla panik atardı; erken ve temiz reddet.
+	if len(*tr.SenderPublicKey) != 128 || len(*tr.Signature) != 128 {
 		return false
 	}
 	return true

@@ -2,43 +2,201 @@
 <html lang="tr">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'">
   <title>FlatunChain</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main>
+  <div class="bg-grid" aria-hidden="true"></div>
+
+  <!-- ============ ONBOARDING / KURTARMA ============ -->
+  <div id="screen-onboarding" class="screen hidden">
+    <div class="onboard-wrap">
+      <div class="lang-row">
+        <select id="ob-lang-select" class="lang-select mono" aria-label="Language"></select>
+      </div>
+
+      <!-- Adım: seçim -->
+      <section id="ob-choice" class="card ob-step hidden">
+        <div class="brand">
+          <div class="brand-mark">⛓</div>
+          <h1 class="ob-title">FLATUNCHAIN</h1>
+          <div class="brand-sub" data-i18n="ob.sub">kişisel node &amp; madencilik terminali</div>
+        </div>
+        <p class="hint center" data-i18n="ob.intro">Cüzdanın bu bilgisayarda oluşturulur ve şifreli saklanır.
+          Kurtarma kelimeleri tek yedeğindir — onları kaybedersen paranı kimse geri getiremez.</p>
+        <button id="ob-create-btn" class="primary big" data-i18n="ob.create">Yeni cüzdan oluştur</button>
+        <button id="ob-import-btn" class="secondary big" data-i18n="ob.import">Kurtarma kelimeleriyle içe aktar</button>
+        <p id="ob-choice-error" class="error hidden"></p>
+        <p id="ob-keyring-warn" class="warn hidden" data-i18n="ob.keyringWarn">Sistem anahtarlığı bulunamadı:
+          cüzdan dosyası bu sistemde şifrelenemeyecek. Yine de devam edebilirsin.</p>
+      </section>
+
+      <!-- Adım: kelimeleri göster -->
+      <section id="ob-words" class="card ob-step hidden">
+        <h2 data-i18n="ob.wordsTitle">Kurtarma kelimelerin</h2>
+        <p class="hint" data-i18n="ob.wordsHint">Bu kelimeleri sırasıyla bir kâğıda yaz ve güvenli bir yerde sakla.
+          Ekran görüntüsü alma, kimseyle paylaşma. Bu kelimeleri bilen herkes paranı harcayabilir.</p>
+        <ol id="ob-words-list" class="words"></ol>
+        <div class="btn-row">
+          <button id="ob-words-back" class="secondary" data-i18n="ob.back">Geri</button>
+          <button id="ob-words-next" class="primary" data-i18n="ob.wordsNext">Yazdım, devam et</button>
+        </div>
+      </section>
+
+      <!-- Adım: doğrulama -->
+      <section id="ob-verify" class="card ob-step hidden">
+        <h2 data-i18n="ob.verifyTitle">Kelimeleri doğrula</h2>
+        <p class="hint" data-i18n="ob.verifyHint">Gerçekten yazdığından emin olalım — istenen kelimeleri gir.</p>
+        <div id="ob-quiz" class="quiz"></div>
+        <p id="ob-verify-error" class="error hidden"></p>
+        <div class="btn-row">
+          <button id="ob-verify-back" class="secondary" data-i18n="ob.verifyBack">Kelimelere dön</button>
+          <button id="ob-verify-btn" class="primary" data-i18n="ob.verifyBtn">Doğrula ve bitir</button>
+        </div>
+      </section>
+
+      <!-- Adım: içe aktar / kurtar -->
+      <section id="ob-import" class="card ob-step hidden">
+        <h2 id="ob-import-title" data-i18n="ob.importTitle">Cüzdanı içe aktar</h2>
+        <p id="ob-import-note" class="hint" data-i18n="ob.importNote">Kurtarma kelimelerini (12–24 kelime) aralarında
+          boşluk bırakarak gir.</p>
+        <textarea id="ob-import-text" rows="4" autocomplete="off" autocapitalize="off"
+          spellcheck="false" data-i18n-placeholder="ob.importPlaceholder" placeholder="ör. oak cheap payment core …"></textarea>
+        <p id="ob-import-error" class="error hidden"></p>
+        <div class="btn-row">
+          <button id="ob-import-back" class="secondary" data-i18n="ob.back">Geri</button>
+          <button id="ob-import-go" class="primary" data-i18n="ob.importGo">İçe aktar</button>
+        </div>
+      </section>
+
+      <p id="ob-busy" class="hint center hidden" data-i18n="app.preparing">Hazırlanıyor…</p>
+    </div>
+  </div>
+
+  <!-- ============ ANA EKRAN ============ -->
+  <main id="screen-main" class="screen hidden">
     <header>
-      <h1>⛓ FlatunChain</h1>
-      <span id="node-status" class="badge">bağlanıyor…</span>
+      <div class="brand-row">
+        <span class="brand-mark small">⛓</span>
+        <h1>FLATUNCHAIN</h1>
+        <span class="net-tag">testnet</span>
+      </div>
+      <div class="head-right">
+        <select id="lang-select" class="lang-select mono" aria-label="Language"></select>
+        <span id="node-status" class="badge" data-i18n="app.connecting">bağlanıyor…</span>
+      </div>
     </header>
 
+    <div id="banner" class="banner hidden">
+      <span id="banner-text"></span>
+      <button id="banner-action" class="banner-btn hidden"></button>
+    </div>
+
     <section class="card balance-card">
-      <div class="label">Bakiyen</div>
+      <div class="label" data-i18n="main.balance">Bakiyen</div>
       <div class="balance"><span id="balance">—</span> <small>FLATUN</small></div>
-      <div class="address" id="address" title="Adresin">—</div>
+      <div class="address-row">
+        <div class="address mono" id="address" data-i18n-title="main.addrTitle" title="Adresin">—</div>
+        <button id="copy-addr" class="chip-btn" data-i18n-title="main.copyTitle" title="Adresi kopyala" data-i18n="main.copy">kopyala</button>
+      </div>
+    </section>
+
+    <!-- ============ MINING CORE ============ -->
+    <section class="card mine-card">
+      <div class="card-head">
+        <div class="label">Mining Core</div>
+        <div class="mine-state-wrap">
+          <span id="mine-led" class="led"></span>
+          <span id="mine-state" class="mine-state mono" data-i18n="mine.idle">BEKLEMEDE</span>
+        </div>
+      </div>
+
+      <div class="mine-visual" id="mine-visual">
+        <canvas id="mine-canvas"></canvas>
+        <div class="scanline" id="scanline"></div>
+        <div class="hash-ticker mono" id="hash-ticker" data-i18n="mine.waitingNode">node bekleniyor…</div>
+        <div id="block-flash" class="block-flash hidden">
+          <div class="block-flash-inner">
+            <div id="block-flash-title" class="bf-title mono"></div>
+            <div id="block-flash-sub" class="bf-sub mono"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="stats-grid mono">
+        <div class="stat"><div class="stat-label" data-i18n="stats.height">blok yüksekliği</div><div class="stat-value" id="st-height">—</div></div>
+        <div class="stat"><div class="stat-label" data-i18n="stats.difficulty">zorluk hedefi</div><div class="stat-value" id="st-difficulty">—</div></div>
+        <div class="stat"><div class="stat-label" data-i18n="stats.attempts">hash denemesi</div><div class="stat-value" id="st-attempts">—</div></div>
+        <div class="stat"><div class="stat-label" data-i18n="stats.pool">bekleyen işlem</div><div class="stat-value" id="st-pool">—</div></div>
+        <div class="stat accent"><div class="stat-label" data-i18n="stats.myBlocks">kazdığın blok</div><div class="stat-value" id="st-myblocks">—</div></div>
+        <div class="stat accent"><div class="stat-label" data-i18n="stats.myReward">madencilik kazancın</div><div class="stat-value" id="st-myreward">—</div></div>
+      </div>
+
+      <div class="cycle-row">
+        <div class="cycle-track"><div class="cycle-fill" id="cycle-fill"></div></div>
+        <span class="cycle-label mono" id="cycle-label"></span>
+      </div>
+
+      <div class="mine-controls">
+        <button id="mine-toggle" class="primary" disabled data-i18n="mine.loading">Yükleniyor…</button>
+        <span id="mine-info" class="hint"></span>
+      </div>
+      <div id="mine-session" class="session-line mono"></div>
     </section>
 
     <section class="card">
-      <div class="label">Madencilik</div>
-      <p class="hint">Bilgisayarın açıkken blok kazarak FLATUN kazanırsın.</p>
-      <button id="mine-toggle" class="primary" disabled>Yükleniyor…</button>
-      <span id="mine-info" class="hint"></span>
-    </section>
-
-    <section class="card">
-      <div class="label">Para Gönder</div>
-      <input id="send-to" type="text" placeholder="Alıcı adresi" autocomplete="off" spellcheck="false">
-      <input id="send-amount" type="text" placeholder="Miktar (örn. 1.5)" autocomplete="off">
-      <button id="send-btn" class="primary">Gönder</button>
+      <div class="label" data-i18n="main.send">Para Gönder</div>
+      <input id="send-to" type="text" class="mono" data-i18n-placeholder="main.sendTo" placeholder="Alıcı adresi" autocomplete="off" spellcheck="false">
+      <input id="send-amount" type="text" class="mono" data-i18n-placeholder="main.sendAmount" placeholder="Miktar (örn. 1.5)" autocomplete="off">
+      <button id="send-btn" class="primary" data-i18n="main.sendBtn">Gönder</button>
       <span id="send-result" class="hint"></span>
     </section>
 
     <section class="card log-card">
-      <div class="label">Node günlüğü</div>
+      <div class="card-head">
+        <div class="label" data-i18n="main.log">Node günlüğü</div>
+        <span class="log-tag mono" data-i18n="main.live">canlı</span>
+      </div>
       <pre id="log"></pre>
     </section>
   </main>
+
+  <!-- ============ GÖNDERİM ONAYI ============ -->
+  <div id="confirm-modal" class="overlay hidden">
+    <div class="modal card">
+      <h2 data-i18n="cf.title">Gönderimi onayla</h2>
+      <div class="row"><span class="row-label" data-i18n="cf.to">Alıcı</span><code id="cf-to"></code></div>
+      <div class="row"><span class="row-label" data-i18n="cf.amount">Miktar</span><b id="cf-amount"></b></div>
+      <div class="row"><span class="row-label" data-i18n="cf.fee">Ağ ücreti</span><span>0 FLATUN</span></div>
+      <div class="row"><span class="row-label" data-i18n="cf.balance">Mevcut bakiye</span><span id="cf-balance"></span></div>
+      <p id="cf-warn" class="warn hidden" data-i18n="cf.warn">Bakiyen bu tutardan düşük görünüyor — işlem ağ
+        tarafından reddedilebilir.</p>
+      <p class="hint" data-i18n="cf.hint">Blockchain işlemleri geri alınamaz. Alıcı adresini son kez kontrol et.</p>
+      <div class="btn-row">
+        <button id="cf-cancel" class="secondary" data-i18n="cf.cancel">Vazgeç</button>
+        <button id="cf-send" class="primary" data-i18n="cf.confirm">Onayla ve gönder</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ YEDEKLEME (kelimeleri göster) ============ -->
+  <div id="backup-modal" class="overlay hidden">
+    <div class="modal card">
+      <h2 data-i18n="bk.title">Kurtarma kelimelerin</h2>
+      <p class="hint" data-i18n="bk.hint">Bu kelimeleri sırasıyla kâğıda yaz, güvenli bir yerde sakla ve kimseyle
+        paylaşma. Bu kelimeleri bilen herkes paranı harcayabilir.</p>
+      <ol id="backup-words" class="words"></ol>
+      <p id="backup-error" class="error hidden"></p>
+      <div class="btn-row">
+        <button id="backup-close" class="secondary" data-i18n="bk.close">Kapat</button>
+        <button id="backup-done" class="primary" data-i18n="bk.done">Yazdım, yedekledim</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="i18n.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>
