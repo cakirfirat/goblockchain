@@ -1,21 +1,25 @@
 {
   "name": "flatunchain-desktop",
   "productName": "FlatunChain",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "FlatunChain masaüstü cüzdanı ve madencisi",
   "private": true,
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "test": "node test/walletstore.test.js",
     "dist": "electron-builder"
   },
   "build": {
     "appId": "com.flatunchain.desktop",
     "productName": "FlatunChain",
+    "afterPack": "scripts/adhoc-sign.js",
     "files": [
       "main.js",
       "preload.js",
-      "renderer/**"
+      "walletstore.js",
+      "renderer/**",
+      "assets/**"
     ],
     "extraResources": [
       {
@@ -24,21 +28,46 @@
       }
     ],
     "mac": {
-      "target": "dmg",
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
       "category": "public.app-category.finance"
     },
     "win": {
-      "target": "nsis",
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "artifactName": "FlatunChain-Setup-${version}-${arch}.${ext}"
     },
     "linux": {
-      "target": "AppImage",
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "category": "Finance",
       "artifactName": "FlatunChain-${version}-${arch}.${ext}"
     }
   },
   "devDependencies": {
     "electron": "^43.1.1",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "playwright-core": "^1.61.1"
   }
 }
