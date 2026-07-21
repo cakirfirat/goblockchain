@@ -17,18 +17,24 @@ func (s *Signature) String() string {
 	return fmt.Sprintf("%064x%064x", s.R, s.S)
 }
 
+// String2BigIntTuple, 128 hex karakterlik (2x64) dizeyi iki big.Int'e çevirir.
+// Girdi beklenen uzunlukta/biçimde değilse panic yerine sıfır çift döner;
+// böylece halka açık uçlara gelen kısa/bozuk pubkey veya imza dizeleri
+// (ör. s[:64] slice taşması) sunucu goroutine'ini düşüremez — imza
+// doğrulaması sonrasında temizce başarısız olur.
 func String2BigIntTuple(s string) (big.Int, big.Int) {
-	bx, _ := hex.DecodeString(s[:64])
-	by, _ := hex.DecodeString(s[64:])
-
-	var bix big.Int
-	var biy big.Int
-
-	_ = bix.SetBytes(bx)
-	_ = biy.SetBytes(by)
-
+	var bix, biy big.Int
+	if len(s) != 128 {
+		return bix, biy
+	}
+	bx, err1 := hex.DecodeString(s[:64])
+	by, err2 := hex.DecodeString(s[64:])
+	if err1 != nil || err2 != nil {
+		return big.Int{}, big.Int{}
+	}
+	bix.SetBytes(bx)
+	biy.SetBytes(by)
 	return bix, biy
-
 }
 
 func SignatureFromString(s string) *Signature {

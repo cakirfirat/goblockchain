@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/sha256"
 
@@ -46,4 +47,27 @@ func AddressFromPublicKey(pub *ecdsa.PublicKey) string {
 	copy(dc8[:21], vd4)
 	copy(dc8[21:], chsum)
 	return base58.Encode(dc8)
+}
+
+// IsValidAddress, bir blockchain adresinin biçim ve checksum doğrulamasını yapar.
+// AddressFromPublicKey ile üretilen adres 25 bayttır:
+// [versiyon(1)] + [ripemd160(20)] + [checksum(4)]; checksum, ilk 21 baytın
+// çift SHA-256'sının ilk 4 baytıdır. Yanlış yazılmış/bozuk bir alıcı adresine
+// para gönderimi imzalanmadan reddedilir — böylece typo yüzünden para kaybı önlenir.
+func IsValidAddress(address string) bool {
+	if address == "" {
+		return false
+	}
+	decoded := base58.Decode(address)
+	if len(decoded) != 25 {
+		return false
+	}
+	if decoded[0] != 0x00 {
+		return false
+	}
+	versionedPayload := decoded[:21]
+	checksum := decoded[21:]
+	h1 := sha256.Sum256(versionedPayload)
+	h2 := sha256.Sum256(h1[:])
+	return bytes.Equal(h2[:4], checksum)
 }

@@ -4,6 +4,19 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('flatun', {
+  // Uygulama durumu (onboarding mi, ana ekran mı)
+  appState: () => ipcRenderer.invoke('app:state'),
+
+  // Onboarding / kurtarma
+  onboardingGenerate: () => ipcRenderer.invoke('onboarding:generate'),
+  onboardingConfirmNew: () => ipcRenderer.invoke('onboarding:confirmNew'),
+  onboardingImport: (mnemonic) => ipcRenderer.invoke('onboarding:import', mnemonic),
+
+  // Yedekleme (kelimeleri göster / yedeklendi işaretle)
+  revealMnemonic: () => ipcRenderer.invoke('wallet:reveal'),
+  backupDone: () => ipcRenderer.invoke('wallet:backupDone'),
+
+  // Cüzdan / madencilik
   walletInfo: () => ipcRenderer.invoke('wallet:info'),
   balance: () => ipcRenderer.invoke('wallet:balance'),
   send: (recipient, value) => ipcRenderer.invoke('wallet:send', { recipient, value }),
