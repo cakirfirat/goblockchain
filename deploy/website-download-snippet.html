@@ -1,0 +1,45 @@
+<!--
+  FlatunChain indirme butonları — web sitesine BİR KEZ eklenir.
+
+  Nasıl çalışır:
+  - href'ler sabit /latest/ linklerine işaret eder; JavaScript kapalıysa bile
+    her zaman en güncel sürüm iner (sunucudaki symlink'i release.sh günceller).
+  - Sayfa açılınca latest.json çekilir; sürüm numarası ve dosya boyutları
+    otomatik yazılır. Yani sitede eliyle link değiştirmek tarihe karışır.
+-->
+<div id="flatun-download">
+  <p>FlatunChain <strong id="fl-version">yükleniyor…</strong></p>
+  <a class="fl-btn" data-fl="mac"
+     href="https://downloads.yoxar.com/latest/FlatunChain-mac-arm64.dmg">
+     macOS (Apple Silicon) <small data-fl-size="mac"></small></a>
+  <a class="fl-btn" data-fl="windows"
+     href="https://downloads.yoxar.com/latest/FlatunChain-windows-x64.exe">
+     Windows 10/11 <small data-fl-size="windows"></small></a>
+  <a class="fl-btn" data-fl="linux"
+     href="https://downloads.yoxar.com/latest/FlatunChain-linux-x86_64.AppImage">
+     Linux (AppImage) <small data-fl-size="linux"></small></a>
+  <p><a href="https://downloads.yoxar.com/latest/SHA256SUMS.txt">SHA-256 doğrulama</a> ·
+     <a href="https://downloads.yoxar.com/releases/">tüm sürümler</a></p>
+</div>
+
+<script>
+(function () {
+  var mb = function (n) { return (n / 1048576).toFixed(0) + " MB"; };
+  fetch("https://downloads.yoxar.com/latest.json")
+    .then(function (r) { return r.json(); })
+    .then(function (m) {
+      document.getElementById("fl-version").textContent = "v" + m.version;
+      Object.keys(m.platforms).forEach(function (k) {
+        var p = m.platforms[k];
+        var a = document.querySelector('[data-fl="' + k + '"]');
+        var s = document.querySelector('[data-fl-size="' + k + '"]');
+        if (a) a.href = p.url;           // sürümlü kalıcı URL (cache dostu)
+        if (s) s.textContent = "(" + mb(p.size) + ")";
+      });
+    })
+    .catch(function () {
+      // latest.json okunamazsa sabit /latest/ linkleri zaten çalışır
+      document.getElementById("fl-version").textContent = "";
+    });
+})();
+</script>

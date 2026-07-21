@@ -15,3 +15,7 @@ local_node_output.txt
 desktop/node_modules/
 desktop/dist/
 desktop/sidecar/
+
+# Sürüm hattı (release pipeline)
+release/
+release.env
